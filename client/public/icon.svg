@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- CarMaint master mark: amber wrench over a car silhouette on a near-black rounded square.
+       Designed to rasterize cleanly at 180px (apple-touch-icon) and 192/512px. -->
+  <defs>
+    <radialGradient id="glow" cx="70%" cy="8%" r="90%">
+      <stop offset="0%" stop-color="#e8a33d" stop-opacity="0.14" />
+      <stop offset="55%" stop-color="#e8a33d" stop-opacity="0.03" />
+      <stop offset="100%" stop-color="#e8a33d" stop-opacity="0" />
+    </radialGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="#0d0f12" />
+  <rect width="512" height="512" rx="112" fill="url(#glow)" />
+  <!-- car silhouette, subdued -->
+  <g fill="none" stroke="#3a4150" stroke-width="22" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M96 356v-60l38-88a30 30 0 0 1 28-19h188a30 30 0 0 1 28 19l38 88v60" />
+    <path d="M96 296h320" />
+    <circle cx="172" cy="360" r="30" />
+    <circle cx="340" cy="360" r="30" />
+  </g>
+  <!-- amber wrench, foreground -->
+  <path
+    d="M312 148a12 12 0 0 0 0 17l35 35a12 12 0 0 0 17 0l46-46a74 74 0 0 1-98 98l-85 85a26 26 0 0 1-37-37l85-85a74 74 0 0 1 98-98l-46 46z"
+    transform="translate(48 44) scale(0.82)"
+    fill="none"
+    stroke="#e8a33d"
+    stroke-width="30"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+</svg>

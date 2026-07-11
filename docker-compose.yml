@@ -1,0 +1,33 @@
+services:
+  app:
+    build:
+      context: .
+      target: runtime
+    image: carmaint:latest
+    container_name: carmaint
+    init: true
+    ports:
+      - "3000:3000"
+    volumes:
+      # SQLite lives on a named volume: WAL + mmap are unreliable on
+      # Docker Desktop bind mounts. Use the in-app Backup page (or ./backups)
+      # to get data out; `docker compose cp app:/app/data ./data-copy` for raw access.
+      - carmaint-data:/app/data
+      # Auto-backup zips land here on the host — point a cloud-sync client at it.
+      - ./backups:/app/data/backups
+    restart: unless-stopped
+
+  server-test:
+    build:
+      context: .
+      target: server-test
+    profiles: ["test"]
+
+  client-test:
+    build:
+      context: .
+      target: client-test
+    profiles: ["test"]
+
+volumes:
+  carmaint-data:
