@@ -1601,6 +1601,10 @@ select {
     height: 44px;
   }
 
+  .button--small {
+    min-height: 44px;
+  }
+
   .vehicle-card:hover {
     transform: none;
   }

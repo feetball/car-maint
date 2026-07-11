@@ -87,8 +87,20 @@ export default function StatsTab({ vehicleId }) {
   }, [vehicleId]);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    let cancelled = false;
+    setError(null);
+    api
+      .stats(vehicleId)
+      .then((data) => {
+        if (!cancelled) setStats(data);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err.message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [vehicleId]);
 
   if (error) return <ErrorBanner message={error} onRetry={load} />;
   if (!stats) return <Loading />;

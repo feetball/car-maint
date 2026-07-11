@@ -20,13 +20,28 @@ async function runAutoBackup() {
   const dir = path.join(ctx.dataDir, 'backups');
   fs.mkdirSync(dir, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const dest = path.join(dir, `carmaint-backup-${stamp}.zip`);
-  await createBackupZip(ctx.db, ctx.dataDir, dest);
+  const name = `carmaint-backup-${stamp}.zip`;
+  const dest = path.join(dir, name);
+  // Write to a temp name in the same dir and rename into place only on success,
+  // so a failed/aborted write never leaves a truncated zip that GET /api/backups
+  // would list as a valid backup.
+  const tmpDest = path.join(dir, `.tmp-${name}`);
+  try {
+    await createBackupZip(ctx.db, ctx.dataDir, tmpDest);
+    fs.renameSync(tmpDest, dest);
+  } catch (err) {
+    try {
+      fs.rmSync(tmpDest, { force: true });
+    } catch {
+      /* best-effort */
+    }
+    throw err;
+  }
 
   const keep = Number.isFinite(AUTO_BACKUP_KEEP) ? AUTO_BACKUP_KEEP : 14;
   const zips = fs
     .readdirSync(dir)
-    .filter((n) => n.toLowerCase().endsWith('.zip'))
+    .filter((n) => !n.startsWith('.') && n.toLowerCase().endsWith('.zip'))
     .sort(); // ISO-ish timestamps sort chronologically
   if (keep >= 0 && zips.length > keep) {
     for (const name of zips.slice(0, zips.length - keep)) {
@@ -44,7 +59,11 @@ if (AUTO_BACKUP_HOURS !== '0') {
   const hours = Number.parseFloat(AUTO_BACKUP_HOURS);
   if (Number.isFinite(hours) && hours > 0) {
     backupTimer = setInterval(() => {
-      runAutoBackup().catch((err) => console.error('Auto-backup failed:', err));
+      runAutoBackup().catch((err) =>
+        console.error(
+          `Auto-backup failed: ${err?.message || err} — is ./backups writable by the container user? See README.`
+        )
+      );
     }, hours * 60 * 60 * 1000);
     backupTimer.unref();
   }

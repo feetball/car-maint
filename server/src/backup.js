@@ -3,9 +3,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import yazl from 'yazl';
 import yauzl from 'yauzl';
-import { badRequest } from './helpers.js';
+import { badRequest, HttpError } from './helpers.js';
 
 const BACKUP_TABLES = ['vehicles', 'photos', 'records', 'reminders'];
+
+// Ceiling on total decompressed bytes written during a restore, and on any
+// single entry. Guards against zip bombs: a tiny upload whose entries expand
+// to fill the data volume. Overridable via RESTORE_MAX_BYTES; defaults to 2 GB.
+const RESTORE_MAX_BYTES = (() => {
+  const raw = Number.parseInt(process.env.RESTORE_MAX_BYTES ?? '', 10);
+  return Number.isFinite(raw) && raw > 0 ? raw : 2 * 1024 * 1024 * 1024;
+})();
 
 // Row counts for the manifest / restore response. Uses the passed db handle.
 export function backupCounts(db) {
@@ -93,25 +101,56 @@ function openReadStream(zipfile, entry) {
   });
 }
 
-function streamEntryToFile(zipfile, entry, dest) {
+// Streams one entry to dest, counting bytes actually written (yauzl's declared
+// uncompressedSize can be forged). If the real decompressed size exceeds
+// `limit`, the streams are destroyed and it rejects with a 400. Resolves with
+// the number of bytes written.
+function streamEntryToFile(zipfile, entry, dest, limit) {
   return openReadStream(zipfile, entry).then(
     (rs) =>
       new Promise((resolve, reject) => {
         const ws = fs.createWriteStream(dest);
+        let written = 0;
+        let aborted = false;
+        const abort = (err) => {
+          if (aborted) return;
+          aborted = true;
+          rs.destroy();
+          ws.destroy();
+          reject(err);
+        };
+        rs.on('data', (chunk) => {
+          written += chunk.length;
+          if (written > limit) abort(badRequest('Backup exceeds the maximum allowed size'));
+        });
         rs.on('error', reject);
         ws.on('error', reject);
-        ws.on('finish', resolve);
+        ws.on('finish', () => resolve(written));
         rs.pipe(ws);
       })
   );
 }
 
-function readEntryToBuffer(zipfile, entry) {
+// Reads one entry fully into memory, capped at `limit` bytes so a compressible
+// entry cannot exhaust the heap. Rejects with a 400 past the cap.
+function readEntryToBuffer(zipfile, entry, limit) {
   return openReadStream(zipfile, entry).then(
     (rs) =>
       new Promise((resolve, reject) => {
         const chunks = [];
-        rs.on('data', (c) => chunks.push(c));
+        let size = 0;
+        let aborted = false;
+        rs.on('data', (c) => {
+          if (aborted) return;
+          size += c.length;
+          if (size > limit) {
+            aborted = true;
+            rs.destroy();
+            reject(badRequest('Backup exceeds the maximum allowed size'));
+            return;
+          }
+          chunks.push(c);
+        });
         rs.on('error', reject);
         rs.on('end', () => resolve(Buffer.concat(chunks)));
       })
@@ -131,6 +170,7 @@ export function extractBackupZip(zipPath, stagingDir) {
       let manifestBuf = null;
       let hasDb = false;
       let done = false;
+      let totalBytes = 0; // real decompressed bytes written/read so far
 
       const bail = (e) => {
         if (done) return;
@@ -162,23 +202,38 @@ export function extractBackupZip(zipPath, stagingDir) {
           return bail(badRequest('Backup zip contains an unsafe entry path'));
         }
 
+        // Cheap early reject on the declared size. It is only a hint (yauzl's
+        // uncompressedSize can be forged), so the real cap is enforced by
+        // counting bytes below, but this rejects obvious bombs before we read.
+        if (typeof entry.uncompressedSize === 'number' && entry.uncompressedSize > RESTORE_MAX_BYTES) {
+          return bail(badRequest('Backup exceeds the maximum allowed size'));
+        }
+        // Remaining budget across all entries; the per-entry ceiling is the same
+        // total, so passing the remainder enforces both at once.
+        const remaining = RESTORE_MAX_BYTES - totalBytes;
+
+        // Map read failures to a 400, but preserve an already-shaped size error.
+        const asBadRequest = (e) => (e instanceof HttpError ? e : badRequest('Backup zip is corrupt'));
+
         if (name === 'manifest.json') {
-          readEntryToBuffer(zipfile, entry)
+          readEntryToBuffer(zipfile, entry, remaining)
             .then((buf) => {
+              totalBytes += buf.length;
               manifestBuf = buf;
               zipfile.readEntry();
             })
-            .catch(() => bail(badRequest('Backup zip is corrupt')));
+            .catch((e) => bail(asBadRequest(e)));
           return;
         }
 
         if (name === 'carmaint.db') {
-          streamEntryToFile(zipfile, entry, path.join(stagingDir, 'carmaint.db'))
-            .then(() => {
+          streamEntryToFile(zipfile, entry, path.join(stagingDir, 'carmaint.db'), remaining)
+            .then((n) => {
+              totalBytes += n;
               hasDb = true;
               zipfile.readEntry();
             })
-            .catch(() => bail(badRequest('Backup zip is corrupt')));
+            .catch((e) => bail(asBadRequest(e)));
           return;
         }
 
@@ -189,9 +244,12 @@ export function extractBackupZip(zipPath, stagingDir) {
           } catch {
             return bail(badRequest('Could not stage backup photos'));
           }
-          streamEntryToFile(zipfile, entry, path.join(stagingPhotos, photoMatch[1]))
-            .then(() => zipfile.readEntry())
-            .catch(() => bail(badRequest('Backup zip is corrupt')));
+          streamEntryToFile(zipfile, entry, path.join(stagingPhotos, photoMatch[1]), remaining)
+            .then((n) => {
+              totalBytes += n;
+              zipfile.readEntry();
+            })
+            .catch((e) => bail(asBadRequest(e)));
           return;
         }
 

@@ -144,6 +144,73 @@ Record/reminder `type` must be one of these values → else 400.
 - `GET /api/dashboard` → `{ vehicle_count, record_count, total_cost, due_reminders: <same as /api/reminders/due>, recent_records: [last 10 records across vehicles, date DESC then id DESC, each with vehicle_name as above] }`.
 - `GET /api/vehicles/:id/export.csv` → 200, `text/csv`, header row `date,type,mileage,cost,shop,description,notes`, rows date ASC. Proper CSV quoting (fields containing `"` `,` or newline get quoted, `"` doubled). `Content-Disposition: attachment`.
 
+## V3: Vercel support, auth, VIN/recalls, calendar & notifications
+
+### Data layer (dual driver)
+
+All route DB access goes through an async facade created per app: `db.all(sql, params)`, `db.get(sql, params)`, `db.run(sql, params)` → `{ lastInsertRowid: number, changes: number }`, and `db.tx(async (t) => {...})` where `t` has the same methods and runs atomically.
+
+- Driver `sqlite` (default): wraps better-sqlite3 (resolve-immediately promises). `tx` = manual `BEGIN IMMEDIATE`/`COMMIT`/`ROLLBACK` (safe: microtask-only awaits never yield to other requests).
+- Driver `libsql`: `@libsql/client` (`TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN`, or any `file:`/`http(s):` URL). `tx` = interactive `client.transaction("write")`. Normalize bigint `lastInsertRowid` to Number. Same SQL dialect — do not fork SQL strings.
+- Selection: `createApp({ dataDir, dbDriver, dbUrl })`, defaulting from env `DB_DRIVER` (`sqlite`|`libsql`), `TURSO_DATABASE_URL`.
+- Tests run the full suite under BOTH drivers (libsql via `file:` URL in the container).
+
+### Photo storage (dual store)
+
+`PhotoStore` interface: `put(filename, buffer, mimetype) → {url}`, `delete(filename)`, `read(filename) → buffer` (for backup bundling), `list()`.
+- `disk` (default): current behavior, `<dataDir>/photos`, served at `/photos/<filename>`, url = `/photos/<filename>`.
+- `blob`: `@vercel/blob` when `BLOB_READ_WRITE_TOKEN` is set; public access; url = absolute blob URL; photos stored under `photos/<filename>`.
+- Every photo in API responses gains `url`; vehicle list `primary_photo` keeps the filename and adds `primary_photo_url`. The client must use `url`/`primary_photo_url` exclusively.
+
+### Backup/restore v3 (driver-agnostic, atomic)
+
+- Backup zip format unchanged (manifest.json + carmaint.db + photos/*). Snapshot construction: sqlite driver keeps native `db.backup()`; libsql driver builds a fresh better-sqlite3 file in tmp by copying all rows through the facade. In blob mode, photo bytes are fetched from the store.
+- **Restore is now a data-level import, not a file swap**: validate the uploaded zip exactly as v2, open the extracted carmaint.db READ-ONLY via better-sqlite3, then inside ONE `db.tx`: delete all rows (children first), insert all rows preserving ids. Photo files: write all new files to the store first (UUID names can't collide), then run the tx, then best-effort delete orphaned old files. A failure before/inside the tx leaves live data fully intact (400/500 with {error}); no db handle swapping remains.
+- Auto-backup zips: docker → `<dataDir>/backups` (unchanged); blob mode → blob `backups/` prefix; `GET /api/backups` lists from the active location; `GET /api/backups/:filename` streams/redirects.
+
+### Auth (optional, required for public deploys)
+
+Enabled iff env `APP_PASSWORD` is set. When enabled:
+- `POST /api/login` `{password}` → constant-time compare → sets httpOnly signed cookie `carmaint_session` (HMAC-SHA256, key = sha256(APP_PASSWORD + AUTH_SECRET?), 30-day expiry embedded and verified). 401 `{error}` on wrong password. `POST /api/logout` clears. `GET /api/auth/status` → `{required, authenticated}` (always available unauthenticated).
+- Everything else under `/api`, plus `/photos/*`, requires the cookie → else 401 `{error:"Authentication required"}`. Static SPA assets stay public.
+- `/calendar.ics` uses `?token=<hex hmac of "calendar" with the same key>` instead of cookies; `GET /api/calendar-url` (authed) returns the tokened path.
+- `/api/cron/*` accepts `Authorization: Bearer <CRON_SECRET>` (Vercel sends this automatically when the env var is set).
+- Client: on `{required:true, authenticated:false}` (or any 401) show a full-screen login view; api helper retriggers it on 401s.
+
+### VIN decode + recalls (NHTSA)
+
+- `GET /api/vin/:vin` — VIN = 11–17 alphanumerics excluding I/O/Q else 400. Proxies vPIC `DecodeVinValues/<vin>?format=json` → 200 `{vin, year, make, model, trim, body_class, engine, plant}` (nulls for blanks). Upstream failure → 502 `{error}`.
+- `GET /api/vehicles/:id/recalls` — proxies `recalls/recallsByVehicle?make=&model=&modelYear=` using the vehicle row → 200 `{fetched_at, recalls: [{campaign_number, component, summary, consequence, remedy, report_date}]}`. Cached in table `recalls_cache(vehicle_id INTEGER PRIMARY KEY, fetched_at TEXT, payload TEXT)`, TTL 24h, `?refresh=1` bypasses. Upstream failure with warm cache → serve cache; cold → 502.
+- Base URLs from `createApp({ nhtsaVpicBase, nhtsaRecallsBase })` defaulting to env `NHTSA_VPIC_BASE`/`NHTSA_RECALLS_BASE` then the real endpoints — tests point these at a local stub; no test may hit the internet.
+- Client: "Decode VIN" button in VehicleForm (fills year/make/model/trim→notes on success, inline error on failure); "Recalls" tab on vehicle detail (lazy fetch, count badge after load, refresh button, empty/error states).
+
+### Calendar feed + notifications
+
+- `GET /calendar.ics` — `text/calendar; charset=utf-8`. One all-day VEVENT per reminder with a computable `next_due_date`: `UID reminder-<id>@carmaint`, `DTSTART;VALUE=DATE`, `SUMMARY "<type label> due — <vehicle name>"`, `DESCRIPTION` incl. mileage due info, proper RFC 5545 escaping (`\\` `;` `,` newlines) and CRLF line endings. Registered before the SPA fallback; vite dev proxy includes it.
+- `src/notify.js`: `collectDue(db)` → `{overdue, due_soon}` (reuse reminder status logic); `sendNotifications(cfg, due, fetchImpl)` posts to `NTFY_URL` (plain text, `Title` header) and/or `NOTIFY_WEBHOOK_URL` (JSON `{title, body, overdue, due_soon}`). No-op when nothing due.
+- Docker: `index.js` timer `NOTIFY_CHECK_HOURS` (default 24, 0 disables, requires a target env). Vercel: `GET /api/cron/notify`. `GET /api/cron/backup` runs an auto-backup. Both cron routes require the CRON_SECRET bearer when set, always return `{ok, ...}` JSON.
+- Client: "Calendar & notifications" section on the Backup page — shows the (tokened) calendar URL with copy button + Apple/Google subscribe hint, and documents NTFY_URL/NOTIFY_WEBHOOK_URL.
+
+### Vercel packaging
+
+- `api/index.js`: builds the Express app once (blob/libsql selected via env; `dataDir` = `/tmp/carmaint` for multer/backup scratch) and exports it as the default handler.
+- Root `package.json`: server runtime deps (+ `@libsql/client`, `@vercel/blob`) so Vercel's tracer bundles them; api/index.js imports from `../server/src/app.js`.
+- `vercel.json`: `buildCommand` builds the client, `outputDirectory client/dist`, rewrites `/api/(.*)`, `/photos/(.*)`, `/calendar.ics` → the function, SPA fallback otherwise; `crons`: daily `/api/cron/backup` and `/api/cron/notify`.
+- README gains a "Deploy to Vercel" walkthrough: create Turso DB + Vercel Blob store, set env vars (`DB_DRIVER=libsql`, `TURSO_*`, `BLOB_READ_WRITE_TOKEN`, **`APP_PASSWORD` strongly recommended**, `CRON_SECRET`), deploy. Docker remains the primary, fully-offline path and its behavior must not change when the new env vars are absent.
+
+### New/changed env summary
+
+| Var | Default | Purpose |
+|---|---|---|
+| DB_DRIVER | sqlite | `sqlite` or `libsql` |
+| TURSO_DATABASE_URL / TURSO_AUTH_TOKEN | — | libsql target |
+| BLOB_READ_WRITE_TOKEN | — | enables Vercel Blob photo/backup store |
+| APP_PASSWORD (+ optional AUTH_SECRET) | — | enables auth |
+| CRON_SECRET | — | guards /api/cron/* |
+| NHTSA_VPIC_BASE / NHTSA_RECALLS_BASE | real NHTSA | test stubbing |
+| NOTIFY_CHECK_HOURS / NTFY_URL / NOTIFY_WEBHOOK_URL | 24 / — / — | notifications |
+| RESTORE_MAX_BYTES | 2147483648 | zip-bomb ceiling |
+
 ## Frontend (client/)
 
 Vite dev proxy: `/api`, `/photos` → `http://localhost:3000`. Production build served by the server (STATIC_DIR).

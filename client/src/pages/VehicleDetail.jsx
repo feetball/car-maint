@@ -41,10 +41,22 @@ export default function VehicleDetail() {
   }, [id]);
 
   useEffect(() => {
+    let cancelled = false;
     setVehicle(null);
     setTab('service');
-    load();
-  }, [load]);
+    setError(null);
+    api
+      .vehicle(id)
+      .then((data) => {
+        if (!cancelled) setVehicle(data);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err.message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
 
   async function handleEdit(payload) {
     setSaving(true);

@@ -172,7 +172,7 @@ export function backupRouter(ctx) {
       return res.json([]);
     }
     const items = names
-      .filter((n) => n.toLowerCase().endsWith('.zip'))
+      .filter((n) => !n.startsWith('.') && n.toLowerCase().endsWith('.zip'))
       .map((filename) => {
         try {
           const st = fs.statSync(path.join(dir, filename));

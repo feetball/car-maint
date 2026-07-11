@@ -31,8 +31,20 @@ export default function Vehicles() {
   }, []);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    let cancelled = false;
+    setError(null);
+    api
+      .vehicles()
+      .then((data) => {
+        if (!cancelled) setVehicles(data);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err.message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   async function handleCreate(payload) {
     setSaving(true);

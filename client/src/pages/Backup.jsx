@@ -71,6 +71,14 @@ export default function Backup() {
     } catch (err) {
       // AbortError = the user dismissed the share sheet; that's not an error.
       if (err && err.name === 'AbortError') return;
+      // NotAllowedError = iOS's transient user activation expired while a large
+      // backup downloaded, so navigator.share() refused. Point at the download.
+      if (err && err.name === 'NotAllowedError') {
+        setShareError(
+          'The backup took too long to prepare for sharing — use Download backup instead, then share it from the Files app.'
+        );
+        return;
+      }
       setShareError(err.message || 'Sharing failed');
     } finally {
       setSharing(false);
@@ -211,7 +219,7 @@ export default function Backup() {
           <EmptyState
             icon="archive"
             title="No automatic backups yet"
-            message="CarMaint writes a daily backup .zip into ./data/backups (tune the schedule with the AUTO_BACKUP_HOURS and AUTO_BACKUP_KEEP environment variables). Point that folder at a cloud-sync client — an iCloud Drive folder on a Mac, or Google Drive for desktop — and your backups upload themselves."
+            message="CarMaint writes a daily backup .zip into ./backups (tune the schedule with the AUTO_BACKUP_HOURS and AUTO_BACKUP_KEEP environment variables). Point that folder at a cloud-sync client — an iCloud Drive folder on a Mac, or Google Drive for desktop — and your backups upload themselves."
           />
         )}
         {backups && backups.length > 0 && (
@@ -258,7 +266,7 @@ export default function Backup() {
               </table>
             </div>
             <p className="backup-note">
-              These land in <code>./data/backups</code> on the server. Sync that folder with an
+              These land in <code>./backups</code> on the server. Sync that folder with an
               iCloud Drive folder (Mac) or Google Drive for desktop and every automatic backup is
               in the cloud, hands-free.
             </p>

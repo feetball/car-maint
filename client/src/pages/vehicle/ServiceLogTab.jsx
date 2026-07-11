@@ -43,8 +43,20 @@ export default function ServiceLogTab({ vehicleId, onChanged }) {
   }, [vehicleId, filter]);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    let cancelled = false;
+    setError(null);
+    api
+      .records(vehicleId, filter)
+      .then((data) => {
+        if (!cancelled) setRecords(data);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err.message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [vehicleId, filter]);
 
   async function handleSave(payload) {
     setBusy(true);

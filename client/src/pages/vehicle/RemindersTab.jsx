@@ -91,8 +91,20 @@ export default function RemindersTab({ vehicleId, currentMileage }) {
   }, [vehicleId]);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    let cancelled = false;
+    setError(null);
+    api
+      .reminders(vehicleId)
+      .then((data) => {
+        if (!cancelled) setReminders(data);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err.message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [vehicleId]);
 
   async function handleSave(payload) {
     setBusy(true);
