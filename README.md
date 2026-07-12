@@ -64,6 +64,33 @@ docker compose --profile test run --rm client-test   # frontend component/unit t
 
 To change the host port, edit the `ports` mapping in `docker-compose.yml` (e.g. `"8080:3000"`).
 
+## Deploy to Vercel
+
+CarMaint also runs fully serverless on Vercel. Because Vercel functions have no persistent disk, two free external stores hold the state:
+
+1. **Database — [Turso](https://turso.tech)** (SQLite-compatible, generous free tier): create a database, note its `libsql://` URL and auth token.
+2. **Photos & backups — Vercel Blob**: in your Vercel project, Storage → Create → Blob; this provisions `BLOB_READ_WRITE_TOKEN` automatically.
+
+Then:
+
+```sh
+npm i -g vercel
+vercel deploy
+```
+
+Set these environment variables in the Vercel project:
+
+| Var | Value |
+|---|---|
+| `DB_DRIVER` | `libsql` |
+| `TURSO_DATABASE_URL` | your `libsql://…` URL |
+| `TURSO_AUTH_TOKEN` | your Turso token |
+| `BLOB_READ_WRITE_TOKEN` | (auto-set by the Blob store) |
+| `APP_PASSWORD` | **set this** — a Vercel deployment is on the public internet |
+| `CRON_SECRET` | any random string; guards the daily backup/notification crons |
+
+The bundled `vercel.json` builds the SPA, routes `/api/*`, `/photos/*`, and `/calendar.ics` to the serverless function, and schedules daily backup + due-service-notification crons. Docker remains the primary path and needs none of these variables.
+
 ## Development without Docker
 
 ```sh

@@ -113,6 +113,46 @@ describe('Backup page', () => {
     expect(shared.files[0].type).toBe('application/zip');
   });
 
+  it('renders the calendar subscription URL and copies it to the clipboard', async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(window.navigator, 'clipboard', {
+      configurable: true,
+      writable: true,
+      value: { writeText },
+    });
+    const fetchMock = vi.fn(async (url) => {
+      if (url === '/api/calendar-url') return jsonResponse({ url: '/calendar.ics?token=abc123' });
+      return jsonResponse([]);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    try {
+      render(<Backup />);
+
+      expect(
+        screen.getByRole('heading', { name: /calendar & notifications/i })
+      ).toBeInTheDocument();
+
+      // Full URL = window.location.origin + the tokened path from the API.
+      const fullUrl = `${window.location.origin}/calendar.ics?token=abc123`;
+      const urlNode = await screen.findByText(fullUrl);
+      expect(urlNode).toBeInTheDocument();
+
+      // Env-var documentation for the notification pings (mentioned more than once).
+      expect(screen.getAllByText('NTFY_URL').length).toBeGreaterThan(0);
+      expect(screen.getAllByText('NOTIFY_WEBHOOK_URL').length).toBeGreaterThan(0);
+
+      await user.click(screen.getByRole('button', { name: /copy/i }));
+      expect(writeText).toHaveBeenCalledWith(fullUrl);
+      expect(await screen.findByRole('button', { name: /copied/i })).toBeInTheDocument();
+
+      expect(fetchMock).toHaveBeenCalledWith('/api/calendar-url', expect.anything());
+    } finally {
+      delete window.navigator.clipboard;
+    }
+  });
+
   it('asks for confirmation with a strong warning before restoring', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse([])));
 

@@ -3,15 +3,14 @@ import request from 'supertest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createApp } from '../src/app.js';
-import { makeVehicle, addRecord, addReminder } from './helpers.js';
+import { makeApp, makeVehicle, addRecord, addReminder } from './helpers.js';
 
 let dataDir;
 let app;
 
 beforeEach(() => {
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'carmaint-'));
-  app = createApp({ dataDir });
+  app = makeApp(dataDir);
 });
 
 afterEach(() => {

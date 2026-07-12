@@ -1,6 +1,8 @@
 **/node_modules
 **/dist
-**/data
+data
+server/data
+client/data
 backups
 .git
 .claude

@@ -11,12 +11,14 @@ import ServiceLogTab from './vehicle/ServiceLogTab.jsx';
 import RemindersTab from './vehicle/RemindersTab.jsx';
 import PhotosTab from './vehicle/PhotosTab.jsx';
 import StatsTab from './vehicle/StatsTab.jsx';
+import RecallsTab from './vehicle/RecallsTab.jsx';
 
 const TABS = [
   { id: 'service', label: 'Service Log' },
   { id: 'reminders', label: 'Reminders' },
   { id: 'photos', label: 'Photos' },
   { id: 'stats', label: 'Stats' },
+  { id: 'recalls', label: 'Recalls' },
 ];
 
 export default function VehicleDetail() {
@@ -30,6 +32,7 @@ export default function VehicleDetail() {
   const [saving, setSaving] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [recallCount, setRecallCount] = useState(null);
 
   const load = useCallback(async () => {
     setError(null);
@@ -45,6 +48,7 @@ export default function VehicleDetail() {
     setVehicle(null);
     setTab('service');
     setError(null);
+    setRecallCount(null);
     api
       .vehicle(id)
       .then((data) => {
@@ -116,7 +120,7 @@ export default function VehicleDetail() {
         {primary && (
           <div
             className="vehicle-hero__backdrop"
-            style={{ backgroundImage: `url("/photos/${primary.filename}")` }}
+            style={{ backgroundImage: `url("${primary.url}")` }}
             aria-hidden="true"
           />
         )}
@@ -179,6 +183,14 @@ export default function VehicleDetail() {
             onClick={() => setTab(t.id)}
           >
             {t.label}
+            {t.id === 'recalls' && recallCount != null && (
+              <span
+                className={`tab__badge${recallCount > 0 ? ' tab__badge--alert' : ''}`}
+                aria-label={`${recallCount} open recall${recallCount === 1 ? '' : 's'}`}
+              >
+                {recallCount}
+              </span>
+            )}
           </button>
         ))}
       </nav>
@@ -190,6 +202,7 @@ export default function VehicleDetail() {
         )}
         {tab === 'photos' && <PhotosTab vehicle={vehicle} onChanged={load} />}
         {tab === 'stats' && <StatsTab vehicleId={vehicle.id} />}
+        {tab === 'recalls' && <RecallsTab vehicleId={vehicle.id} onCount={setRecallCount} />}
       </div>
 
       {editing && (

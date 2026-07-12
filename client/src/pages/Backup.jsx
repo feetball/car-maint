@@ -35,6 +35,10 @@ export default function Backup() {
   const [backups, setBackups] = useState(null);
   const [backupsError, setBackupsError] = useState(null);
 
+  const [calendarPath, setCalendarPath] = useState(null);
+  const [calendarError, setCalendarError] = useState(null);
+  const [copied, setCopied] = useState(false);
+
   const loadBackups = useCallback(async () => {
     setBackupsError(null);
     try {
@@ -44,9 +48,38 @@ export default function Backup() {
     }
   }, []);
 
+  const loadCalendar = useCallback(async () => {
+    setCalendarError(null);
+    try {
+      const data = await api.calendarUrl();
+      // Tolerate a few response shapes; only set a path when one is present.
+      const path = data && (data.url || data.path || data.calendar_url);
+      setCalendarPath(path || null);
+    } catch (err) {
+      setCalendarError(err.message);
+    }
+  }, []);
+
   useEffect(() => {
     loadBackups();
-  }, [loadBackups]);
+    loadCalendar();
+  }, [loadBackups, loadCalendar]);
+
+  const origin = typeof window !== 'undefined' ? window.location.origin : '';
+  const calendarUrl = calendarPath ? `${origin}${calendarPath}` : null;
+
+  async function handleCopyCalendar() {
+    if (!calendarUrl) return;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(calendarUrl);
+      }
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      /* clipboard blocked — the URL is visible for manual copy */
+    }
+  }
 
   async function handleShare() {
     setSharing(true);
@@ -272,6 +305,46 @@ export default function Backup() {
             </p>
           </>
         )}
+      </section>
+
+      <section className="panel">
+        <h2 className="panel__title">
+          <Icon name="calendar" size={16} /> Calendar &amp; notifications
+        </h2>
+        <p className="backup-note">
+          Subscribe to your maintenance reminders as a calendar feed — every reminder with a due
+          date shows up as an all-day event that refreshes automatically.
+        </p>
+        {calendarError && <ErrorBanner message={calendarError} onRetry={loadCalendar} />}
+        {calendarUrl && (
+          <>
+            <div className="calendar-url">
+              <code className="calendar-url__value num">{calendarUrl}</code>
+              <button
+                type="button"
+                className="button button--ghost button--small calendar-url__copy"
+                onClick={handleCopyCalendar}
+              >
+                <Icon name={copied ? 'check' : 'copy'} size={15} />
+                {copied ? 'Copied' : 'Copy'}
+              </button>
+            </div>
+            <p className="backup-note">
+              <strong>Apple Calendar:</strong> File → New Calendar Subscription, paste the URL.{' '}
+              <strong>Google Calendar:</strong> Other calendars → From URL, paste the same link.
+            </p>
+          </>
+        )}
+        <p className="backup-note">
+          Prefer a push instead? Set <code>NTFY_URL</code> (an{' '}
+          <a className="subtle-link" href="https://ntfy.sh" target="_blank" rel="noreferrer">
+            ntfy
+          </a>{' '}
+          topic) and/or <code>NOTIFY_WEBHOOK_URL</code> on the server and CarMaint pings you when a
+          service comes due. <code>NTFY_URL</code> receives a plain-text message;{' '}
+          <code>NOTIFY_WEBHOOK_URL</code> receives a JSON <code>{'{ title, body, overdue, due_soon }'}</code>{' '}
+          payload. Tune the cadence with <code>NOTIFY_CHECK_HOURS</code> (default 24).
+        </p>
       </section>
 
       {pendingRestore && (
