@@ -4,8 +4,8 @@ import { vehicleName } from './helpers.js';
 const LAST_RECORD_SQL =
   'SELECT date, mileage FROM records WHERE vehicle_id = ? AND type = ? ORDER BY date DESC, id DESC LIMIT 1';
 
-export function augmentReminder(db, vehicle, reminder, todayStr = today()) {
-  const last = db.prepare(LAST_RECORD_SQL).get(vehicle.id, reminder.type);
+export async function augmentReminder(db, vehicle, reminder, todayStr = today()) {
+  const last = await db.get(LAST_RECORD_SQL, [vehicle.id, reminder.type]);
   const last_date = last ? last.date : null;
   const last_mileage = last ? last.mileage ?? null : null;
 
@@ -34,24 +34,27 @@ export function augmentReminder(db, vehicle, reminder, todayStr = today()) {
   return { ...reminder, last_date, last_mileage, next_due_date, next_due_mileage, status };
 }
 
-export function vehicleReminders(db, vehicle, todayStr = today()) {
-  return db
-    .prepare('SELECT * FROM reminders WHERE vehicle_id = ? ORDER BY id ASC')
-    .all(vehicle.id)
-    .map((r) => augmentReminder(db, vehicle, r, todayStr));
+export async function vehicleReminders(db, vehicle, todayStr = today()) {
+  const rows = await db.all('SELECT * FROM reminders WHERE vehicle_id = ? ORDER BY id ASC', [
+    vehicle.id,
+  ]);
+  const out = [];
+  for (const r of rows) {
+    out.push(await augmentReminder(db, vehicle, r, todayStr));
+  }
+  return out;
 }
 
-export function alertCount(db, vehicle, todayStr = today()) {
-  return vehicleReminders(db, vehicle, todayStr).filter(
-    (r) => r.status === 'overdue' || r.status === 'due_soon'
-  ).length;
+export async function alertCount(db, vehicle, todayStr = today()) {
+  const reminders = await vehicleReminders(db, vehicle, todayStr);
+  return reminders.filter((r) => r.status === 'overdue' || r.status === 'due_soon').length;
 }
 
-export function dueReminders(db, todayStr = today()) {
+export async function dueReminders(db, todayStr = today()) {
   const due = [];
-  const vehicles = db.prepare('SELECT * FROM vehicles ORDER BY id ASC').all();
+  const vehicles = await db.all('SELECT * FROM vehicles ORDER BY id ASC');
   for (const vehicle of vehicles) {
-    for (const reminder of vehicleReminders(db, vehicle, todayStr)) {
+    for (const reminder of await vehicleReminders(db, vehicle, todayStr)) {
       if (reminder.status === 'overdue' || reminder.status === 'due_soon') {
         due.push({ ...reminder, vehicle_name: vehicleName(vehicle) });
       }

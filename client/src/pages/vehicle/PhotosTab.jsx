@@ -129,7 +129,7 @@ export default function PhotosTab({ vehicle, onChanged }) {
                 aria-label={`View ${photo.original_name || 'photo'} full size`}
               >
                 <img
-                  src={`/photos/${photo.filename}`}
+                  src={photo.url}
                   alt={photo.original_name || 'Vehicle photo'}
                   loading="lazy"
                 />
@@ -183,7 +183,7 @@ export default function PhotosTab({ vehicle, onChanged }) {
             <Icon name="x" size={20} />
           </button>
           <img
-            src={`/photos/${lightbox.filename}`}
+            src={lightbox.url}
             alt={lightbox.original_name || 'Vehicle photo'}
             onClick={(event) => event.stopPropagation()}
           />

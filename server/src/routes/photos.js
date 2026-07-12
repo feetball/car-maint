@@ -1,9 +1,7 @@
 import crypto from 'node:crypto';
-import fs from 'node:fs';
-import path from 'node:path';
 import { Router } from 'express';
 import multer from 'multer';
-import { HttpError, badRequest, getVehicleOr404, notFound } from '../helpers.js';
+import { HttpError, asyncHandler, badRequest, getVehicleOr404, notFound, withPhotoUrl } from '../helpers.js';
 
 const EXT_BY_MIMETYPE = {
   'image/jpeg': 'jpg',
@@ -32,30 +30,29 @@ export function photosRouter(ctx) {
 
   router.post(
     '/vehicles/:id/photos',
-    (req, res, next) => {
-      req.vehicle = getVehicleOr404(ctx.db, req.params.id);
+    asyncHandler(async (req, res, next) => {
+      req.vehicle = await getVehicleOr404(ctx.db, req.params.id);
       next();
-    },
+    }),
     upload.array('photos', 10),
-    (req, res) => {
+    asyncHandler(async (req, res) => {
       const db = ctx.db;
       const files = req.files ?? [];
       if (files.length === 0) throw badRequest('At least one file is required');
-      const existing = db
-        .prepare('SELECT COUNT(*) AS n FROM photos WHERE vehicle_id = ?')
-        .get(req.vehicle.id).n;
+      const existing = (
+        await db.get('SELECT COUNT(*) AS n FROM photos WHERE vehicle_id = ?', [req.vehicle.id])
+      ).n;
 
-      // Write every file to disk first; if any write fails, unlink this batch's
-      // already-written files and 500 so no orphan files or rows are left behind.
+      // Write every file to the store first; if any write fails, remove this
+      // batch's already-written files and 500 so no orphan files or rows remain.
       const written = [];
       const planned = [];
       let isFirstEver = existing === 0;
       try {
         for (const file of files) {
           const filename = `${crypto.randomUUID()}.${EXT_BY_MIMETYPE[file.mimetype]}`;
-          const full = path.join(ctx.photosDir, filename);
-          fs.writeFileSync(full, file.buffer);
-          written.push(full);
+          await ctx.store.put(filename, file.buffer, file.mimetype);
+          written.push(filename);
           planned.push({
             filename,
             original_name: file.originalname ?? null,
@@ -64,66 +61,69 @@ export function photosRouter(ctx) {
           isFirstEver = false;
         }
       } catch {
-        for (const p of written) {
-          try {
-            fs.unlinkSync(p);
-          } catch {
-            /* best-effort */
-          }
+        for (const filename of written) {
+          await ctx.store.delete(filename);
         }
         throw new HttpError(500, 'Failed to store uploaded files');
       }
 
       // Insert all rows for the batch in a single transaction.
-      const insert = db.prepare(
-        'INSERT INTO photos (vehicle_id, filename, original_name, is_primary) VALUES (?, ?, ?, ?)'
-      );
-      const ids = db.transaction(() =>
-        planned.map(
-          (p) => insert.run(req.vehicle.id, p.filename, p.original_name, p.is_primary).lastInsertRowid
-        )
-      )();
-      const getPhoto = db.prepare('SELECT * FROM photos WHERE id = ?');
-      res.status(201).json(ids.map((id) => getPhoto.get(id)));
-    }
+      const ids = await db.tx(async (t) => {
+        const out = [];
+        for (const p of planned) {
+          const info = await t.run(
+            'INSERT INTO photos (vehicle_id, filename, original_name, is_primary) VALUES (?, ?, ?, ?)',
+            [req.vehicle.id, p.filename, p.original_name, p.is_primary]
+          );
+          out.push(info.lastInsertRowid);
+        }
+        return out;
+      });
+
+      const rows = [];
+      for (const id of ids) {
+        rows.push(await db.get('SELECT * FROM photos WHERE id = ?', [id]));
+      }
+      res.status(201).json(rows.map((p) => withPhotoUrl(ctx.store, p)));
+    })
   );
 
-  router.put('/photos/:id/primary', (req, res) => {
-    const db = ctx.db;
-    const getPhoto = db.prepare('SELECT * FROM photos WHERE id = ?');
-    const photo = getPhoto.get(req.params.id);
-    if (!photo) throw notFound('Photo not found');
-    db.transaction(() => {
-      db.prepare('UPDATE photos SET is_primary = 0 WHERE vehicle_id = ?').run(photo.vehicle_id);
-      db.prepare('UPDATE photos SET is_primary = 1 WHERE id = ?').run(photo.id);
-    })();
-    res.json(getPhoto.get(photo.id));
-  });
+  router.put(
+    '/photos/:id/primary',
+    asyncHandler(async (req, res) => {
+      const db = ctx.db;
+      const photo = await db.get('SELECT * FROM photos WHERE id = ?', [req.params.id]);
+      if (!photo) throw notFound('Photo not found');
+      await db.tx(async (t) => {
+        await t.run('UPDATE photos SET is_primary = 0 WHERE vehicle_id = ?', [photo.vehicle_id]);
+        await t.run('UPDATE photos SET is_primary = 1 WHERE id = ?', [photo.id]);
+      });
+      res.json(withPhotoUrl(ctx.store, await db.get('SELECT * FROM photos WHERE id = ?', [photo.id])));
+    })
+  );
 
-  router.delete('/photos/:id', (req, res) => {
-    const db = ctx.db;
-    const photo = db.prepare('SELECT * FROM photos WHERE id = ?').get(req.params.id);
-    if (!photo) throw notFound('Photo not found');
-    // Commit the delete + primary promotion in ONE transaction first, then unlink
-    // best-effort: a failed unlink must never 500 nor skip the promotion.
-    db.transaction(() => {
-      db.prepare('DELETE FROM photos WHERE id = ?').run(photo.id);
-      if (photo.is_primary) {
-        const oldest = db
-          .prepare(
-            'SELECT id FROM photos WHERE vehicle_id = ? ORDER BY uploaded_at ASC, id ASC LIMIT 1'
-          )
-          .get(photo.vehicle_id);
-        if (oldest) db.prepare('UPDATE photos SET is_primary = 1 WHERE id = ?').run(oldest.id);
-      }
-    })();
-    try {
-      fs.unlinkSync(path.join(ctx.photosDir, photo.filename));
-    } catch {
-      /* best-effort: file already gone or unlink failed */
-    }
-    res.status(204).end();
-  });
+  router.delete(
+    '/photos/:id',
+    asyncHandler(async (req, res) => {
+      const db = ctx.db;
+      const photo = await db.get('SELECT * FROM photos WHERE id = ?', [req.params.id]);
+      if (!photo) throw notFound('Photo not found');
+      // Commit the delete + primary promotion in ONE transaction first, then remove
+      // the file best-effort: a failed delete must never 500 nor skip the promotion.
+      await db.tx(async (t) => {
+        await t.run('DELETE FROM photos WHERE id = ?', [photo.id]);
+        if (photo.is_primary) {
+          const oldest = await t.get(
+            'SELECT id FROM photos WHERE vehicle_id = ? ORDER BY uploaded_at ASC, id ASC LIMIT 1',
+            [photo.vehicle_id]
+          );
+          if (oldest) await t.run('UPDATE photos SET is_primary = 1 WHERE id = ?', [oldest.id]);
+        }
+      });
+      await ctx.store.delete(photo.filename);
+      res.status(204).end();
+    })
+  );
 
   return router;
 }

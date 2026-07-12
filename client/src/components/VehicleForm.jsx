@@ -1,4 +1,6 @@
 import { useState } from 'react';
+import { api } from '../api.js';
+import Icon from './Icon.jsx';
 
 const EMPTY = {
   name: '',
@@ -75,9 +77,42 @@ export default function VehicleForm({
 }) {
   const [values, setValues] = useState(() => ({ ...EMPTY, ...toFormValues(initial) }));
   const [errors, setErrors] = useState({});
+  const [decoding, setDecoding] = useState(false);
+  const [decodeError, setDecodeError] = useState(null);
 
   function setField(name, value) {
     setValues((prev) => ({ ...prev, [name]: value }));
+  }
+
+  const vinTrimmed = values.vin.trim();
+  const canDecode = vinTrimmed.length >= 11 && vinTrimmed.length <= 17;
+
+  async function handleDecode() {
+    if (!canDecode || decoding) return;
+    setDecoding(true);
+    setDecodeError(null);
+    try {
+      const decoded = await api.decodeVin(vinTrimmed);
+      // Fill from the decode result but NEVER clobber values the user typed:
+      // only empty fields are populated.
+      setValues((prev) => {
+        const next = { ...prev };
+        if (decoded.year != null && String(prev.year).trim() === '') next.year = String(decoded.year);
+        if (decoded.make && prev.make.trim() === '') next.make = decoded.make;
+        if (decoded.model && prev.model.trim() === '') next.model = decoded.model;
+        if (decoded.trim) {
+          // Trim goes to the nickname if it's free, otherwise notes; never over
+          // an existing value.
+          if (prev.name.trim() === '') next.name = decoded.trim;
+          else if (prev.notes.trim() === '') next.notes = decoded.trim;
+        }
+        return next;
+      });
+    } catch (err) {
+      setDecodeError(err.message);
+    } finally {
+      setDecoding(false);
+    }
   }
 
   function handleSubmit(event) {
@@ -156,13 +191,31 @@ export default function VehicleForm({
             aria-invalid={errors.current_mileage ? 'true' : undefined}
           />
         </Field>
-        <Field label="VIN" hint="optional">
-          <input
-            type="text"
-            value={values.vin}
-            onChange={(e) => setField('vin', e.target.value)}
-            placeholder="17 characters"
-          />
+        <Field label="VIN" hint="optional" error={decodeError}>
+          <div className="vin-row">
+            <input
+              type="text"
+              value={values.vin}
+              onChange={(e) => {
+                setField('vin', e.target.value);
+                if (decodeError) setDecodeError(null);
+              }}
+              placeholder="17 characters"
+            />
+            <button
+              type="button"
+              className="button button--ghost vin-row__decode"
+              onClick={handleDecode}
+              disabled={!canDecode || decoding}
+            >
+              {decoding ? (
+                <span className="spinner spinner--inline" aria-hidden="true" />
+              ) : (
+                <Icon name="sparkle" size={15} />
+              )}
+              {decoding ? 'Decoding…' : 'Decode VIN'}
+            </button>
+          </div>
         </Field>
         <Field label="License plate" hint="optional">
           <input

@@ -1,7 +1,17 @@
+// Optional callback invoked on any 401 so the app can flip to the login view.
+// Kept module-level so every request goes through the same gate.
+let unauthorizedHandler = null;
+export function setUnauthorizedHandler(fn) {
+  unauthorizedHandler = fn;
+}
+
 // Tiny fetch helper: JSON in/out, throws Error(message) on !ok using the
-// server's { error } payload when present.
+// server's { error } payload when present. A 401 additionally triggers the
+// unauthorized handler (unless `suppressAuthGate` is set — e.g. the login call
+// itself, whose 401 means "wrong password", not "session expired").
 async function request(path, options = {}) {
-  const opts = { ...options };
+  const { suppressAuthGate, ...rest } = options;
+  const opts = { ...rest };
   if (opts.body !== undefined && !(opts.body instanceof FormData)) {
     opts.headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
     opts.body = JSON.stringify(opts.body);
@@ -11,6 +21,9 @@ async function request(path, options = {}) {
     res = await fetch(path, opts);
   } catch {
     throw new Error('Network error — could not reach the server.');
+  }
+  if (res.status === 401 && !suppressAuthGate && unauthorizedHandler) {
+    unauthorizedHandler();
   }
   if (res.status === 204) return null;
   let data = null;
@@ -26,9 +39,20 @@ async function request(path, options = {}) {
 }
 
 export const api = {
+  // Auth
+  authStatus: () => request('/api/auth/status'),
+  login: (password) => request('/api/login', { method: 'POST', body: { password }, suppressAuthGate: true }),
+  logout: () => request('/api/logout', { method: 'POST' }),
+
   // Dashboard & shared
   dashboard: () => request('/api/dashboard'),
   serviceTypes: () => request('/api/service-types'),
+
+  // VIN decode, recalls, calendar (V3)
+  decodeVin: (vin) => request(`/api/vin/${encodeURIComponent(vin)}`),
+  recalls: (vehicleId, refresh = false) =>
+    request(`/api/vehicles/${vehicleId}/recalls${refresh ? '?refresh=1' : ''}`),
+  calendarUrl: () => request('/api/calendar-url'),
 
   // Vehicles
   vehicles: () => request('/api/vehicles'),

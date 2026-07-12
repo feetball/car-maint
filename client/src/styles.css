@@ -1713,6 +1713,220 @@ select {
   }
 }
 
+/* --- Auth: boot splash + login gate --------------------------------------- */
+
+.app-boot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100dvh;
+}
+
+.login-view {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100dvh;
+  padding: calc(var(--space-5) + env(safe-area-inset-top)) calc(var(--space-4) + env(safe-area-inset-right))
+    calc(var(--space-5) + env(safe-area-inset-bottom)) calc(var(--space-4) + env(safe-area-inset-left));
+}
+
+.login-card {
+  width: 100%;
+  max-width: 360px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-6) var(--space-5);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.login-card__mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.login-card__title {
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.login-card__sub {
+  color: var(--text-dim);
+  font-size: 14px;
+  margin-bottom: var(--space-2);
+}
+
+.login-card__submit {
+  width: 100%;
+  margin-top: var(--space-2);
+}
+
+.logout-button {
+  width: 100%;
+  text-align: left;
+}
+
+/* --- VIN decode row ------------------------------------------------------- */
+
+.vin-row {
+  display: flex;
+  gap: var(--space-2);
+  align-items: stretch;
+}
+
+.vin-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.vin-row__decode {
+  flex-shrink: 0;
+  gap: 6px;
+}
+
+/* --- Tab count badge ------------------------------------------------------ */
+
+.tab__badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+  background: var(--surface-3);
+}
+
+.tab__badge--alert {
+  color: #fff;
+  background: var(--danger);
+}
+
+/* --- Recalls tab ---------------------------------------------------------- */
+
+.recalls-tab {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.recalls-tab__toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.recalls-tab__meta {
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.recall-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.recall-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--danger);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-soft);
+}
+
+.recall-card__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.recall-card__campaign {
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: 0.02em;
+}
+
+.recall-card__date {
+  font-size: 13px;
+  color: var(--text-faint);
+}
+
+.recall-card__component {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.recall-card__facts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.recall-card__facts dt {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+}
+
+.recall-card__facts dd {
+  font-size: 14px;
+  color: var(--text);
+  line-height: 1.5;
+}
+
+/* --- Calendar subscription URL -------------------------------------------- */
+
+.calendar-url {
+  display: flex;
+  gap: var(--space-2);
+  align-items: stretch;
+  flex-wrap: wrap;
+}
+
+.calendar-url__value {
+  flex: 1;
+  min-width: 0;
+  display: block;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  font-size: 13px;
+  color: var(--text-dim);
+  word-break: break-all;
+}
+
+.calendar-url__copy {
+  flex-shrink: 0;
+  gap: 6px;
+}
+
 /* --- Reduced motion --------------------------------------------------------------------------------------- */
 
 @media (prefers-reduced-motion: reduce) {

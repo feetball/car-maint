@@ -3,15 +3,14 @@ import request from 'supertest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createApp } from '../src/app.js';
-import { makeVehicle, uploadPhoto, PNG_1x1 } from './helpers.js';
+import { makeApp, makeVehicle, uploadPhoto, PNG_1x1 } from './helpers.js';
 
 let dataDir;
 let app;
 
 beforeEach(() => {
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'carmaint-'));
-  app = createApp({ dataDir });
+  app = makeApp(dataDir);
 });
 
 afterEach(() => {
@@ -204,6 +203,55 @@ describe('GET /photos/:filename', () => {
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toMatch(/image\/png/);
     expect(Buffer.compare(Buffer.from(res.body), PNG_1x1)).toBe(0);
+  });
+});
+
+describe('v3 photo url fields (disk store)', () => {
+  it('upload response carries url = /photos/<filename> for each row', async () => {
+    const v = await makeVehicle(app);
+    const res = await uploadPhoto(app, v.id);
+    expect(res.status).toBe(201);
+    const photo = res.body[0];
+    expect(photo.url).toBe(`/photos/${photo.filename}`);
+  });
+
+  it('GET vehicle detail attaches url to every photo row', async () => {
+    const v = await makeVehicle(app);
+    const first = (await uploadPhoto(app, v.id, { filename: 'a.png' })).body[0];
+    const second = (await uploadPhoto(app, v.id, { filename: 'b.png' })).body[0];
+
+    const detail = await request(app).get(`/api/vehicles/${v.id}`);
+    expect(detail.status).toBe(200);
+    const byId = new Map(detail.body.photos.map((p) => [p.id, p]));
+    expect(byId.get(first.id).url).toBe(`/photos/${first.filename}`);
+    expect(byId.get(second.id).url).toBe(`/photos/${second.filename}`);
+  });
+
+  it('PUT primary response carries the url field', async () => {
+    const v = await makeVehicle(app);
+    await uploadPhoto(app, v.id, { filename: 'a.png' });
+    const second = (await uploadPhoto(app, v.id, { filename: 'b.png' })).body[0];
+
+    const res = await request(app).put(`/api/photos/${second.id}/primary`);
+    expect(res.status).toBe(200);
+    expect(res.body.url).toBe(`/photos/${second.filename}`);
+  });
+
+  it('vehicles list exposes primary_photo_url alongside primary_photo, null when no photo', async () => {
+    const bare = await makeVehicle(app, { make: 'Bare' });
+    const withPhoto = await makeVehicle(app, { make: 'Shot' });
+    const primary = (await uploadPhoto(app, withPhoto.id, { filename: 'a.png' })).body[0];
+
+    const res = await request(app).get('/api/vehicles');
+    expect(res.status).toBe(200);
+    const bareItem = res.body.find((x) => x.id === bare.id);
+    const photoItem = res.body.find((x) => x.id === withPhoto.id);
+
+    expect(bareItem.primary_photo).toBeNull();
+    expect(bareItem.primary_photo_url).toBeNull();
+
+    expect(photoItem.primary_photo).toBe(primary.filename);
+    expect(photoItem.primary_photo_url).toBe(`/photos/${primary.filename}`);
   });
 });
 

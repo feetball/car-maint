@@ -1,5 +1,9 @@
+import { useCallback, useEffect, useState } from 'react';
 import { Link, NavLink, Route, Routes } from 'react-router-dom';
+import { api, setUnauthorizedHandler } from './api.js';
 import Icon from './components/Icon.jsx';
+import LoginView from './components/LoginView.jsx';
+import { Loading } from './components/ui.jsx';
 import Dashboard from './pages/Dashboard.jsx';
 import Vehicles from './pages/Vehicles.jsx';
 import VehicleDetail from './pages/VehicleDetail.jsx';
@@ -25,6 +29,49 @@ function NotFound() {
 }
 
 export default function App() {
+  // null = still checking; otherwise { required, authenticated }.
+  const [authState, setAuthState] = useState(null);
+
+  const refreshStatus = useCallback(async () => {
+    try {
+      setAuthState(await api.authStatus());
+    } catch {
+      // Status endpoint unreachable — fail open so the offline Docker app (which
+      // has no auth) still renders exactly as before.
+      setAuthState({ required: false, authenticated: true });
+    }
+  }, []);
+
+  useEffect(() => {
+    // Any 401 from the api helper flips the whole app back to the login gate.
+    setUnauthorizedHandler(() => setAuthState({ required: true, authenticated: false }));
+    refreshStatus();
+    return () => setUnauthorizedHandler(null);
+  }, [refreshStatus]);
+
+  async function handleLogout() {
+    try {
+      await api.logout();
+    } catch {
+      /* clear locally regardless of the server's response */
+    }
+    setAuthState({ required: true, authenticated: false });
+  }
+
+  if (!authState) {
+    return (
+      <div className="app-boot">
+        <Loading label="Starting CarMaint…" />
+      </div>
+    );
+  }
+
+  if (authState.required && !authState.authenticated) {
+    return <LoginView onAuthenticated={refreshStatus} />;
+  }
+
+  const authRequired = Boolean(authState.required);
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -48,6 +95,12 @@ export default function App() {
             <span>Backup</span>
           </NavLink>
         </nav>
+        {authRequired && (
+          <button type="button" className="nav-link logout-button" onClick={handleLogout}>
+            <Icon name="log-out" size={17} />
+            <span>Log out</span>
+          </button>
+        )}
         <p className="sidebar__footer">Every mile, accounted for.</p>
       </aside>
       <main className="app-main">

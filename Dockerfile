@@ -21,7 +21,9 @@ WORKDIR /app/server
 COPY server/package.json ./
 RUN npm install
 COPY server/ ./
-CMD ["npm", "test"]
+# Second pass re-runs the whole contract on the libsql driver; capped workers +
+# raised timeout because two native sqlite stacks contend under full parallelism.
+CMD ["sh", "-c", "npm test && DB_DRIVER=libsql npx vitest run --testTimeout=20000 --maxWorkers=4"]
 
 FROM node:20-slim AS runtime
 ENV NODE_ENV=production \

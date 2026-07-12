@@ -1,0 +1,15 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "cd client && npm install && npm run build",
+  "outputDirectory": "client/dist",
+  "rewrites": [
+    { "source": "/api/:path*", "destination": "/api" },
+    { "source": "/photos/:path*", "destination": "/api" },
+    { "source": "/calendar.ics", "destination": "/api" },
+    { "source": "/:path*", "destination": "/index.html" }
+  ],
+  "crons": [
+    { "path": "/api/cron/backup", "schedule": "0 9 * * *" },
+    { "path": "/api/cron/notify", "schedule": "0 15 * * *" }
+  ]
+}

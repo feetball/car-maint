@@ -1,7 +1,6 @@
-import fs from 'node:fs';
-import path from 'node:path';
 import { createApp } from './app.js';
-import { createBackupZip } from './backup.js';
+import { runAutoBackup } from './backup.js';
+import { runNotify } from './notify.js';
 
 const dataDir = process.env.DATA_DIR || './data';
 const app = createApp({ dataDir });
@@ -15,57 +14,43 @@ const server = app.listen(port, () => {
 // --- Auto-backup ---------------------------------------------------------
 const AUTO_BACKUP_HOURS = process.env.AUTO_BACKUP_HOURS ?? '24';
 const AUTO_BACKUP_KEEP = Number.parseInt(process.env.AUTO_BACKUP_KEEP ?? '14', 10);
-
-async function runAutoBackup() {
-  const dir = path.join(ctx.dataDir, 'backups');
-  fs.mkdirSync(dir, { recursive: true });
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const name = `carmaint-backup-${stamp}.zip`;
-  const dest = path.join(dir, name);
-  // Write to a temp name in the same dir and rename into place only on success,
-  // so a failed/aborted write never leaves a truncated zip that GET /api/backups
-  // would list as a valid backup.
-  const tmpDest = path.join(dir, `.tmp-${name}`);
-  try {
-    await createBackupZip(ctx.db, ctx.dataDir, tmpDest);
-    fs.renameSync(tmpDest, dest);
-  } catch (err) {
-    try {
-      fs.rmSync(tmpDest, { force: true });
-    } catch {
-      /* best-effort */
-    }
-    throw err;
-  }
-
-  const keep = Number.isFinite(AUTO_BACKUP_KEEP) ? AUTO_BACKUP_KEEP : 14;
-  const zips = fs
-    .readdirSync(dir)
-    .filter((n) => !n.startsWith('.') && n.toLowerCase().endsWith('.zip'))
-    .sort(); // ISO-ish timestamps sort chronologically
-  if (keep >= 0 && zips.length > keep) {
-    for (const name of zips.slice(0, zips.length - keep)) {
-      try {
-        fs.rmSync(path.join(dir, name), { force: true });
-      } catch {
-        /* best-effort */
-      }
-    }
-  }
-}
+const keep = Number.isFinite(AUTO_BACKUP_KEEP) ? AUTO_BACKUP_KEEP : 14;
 
 let backupTimer = null;
 if (AUTO_BACKUP_HOURS !== '0') {
   const hours = Number.parseFloat(AUTO_BACKUP_HOURS);
   if (Number.isFinite(hours) && hours > 0) {
     backupTimer = setInterval(() => {
-      runAutoBackup().catch((err) =>
+      runAutoBackup(ctx, keep).catch((err) =>
         console.error(
-          `Auto-backup failed: ${err?.message || err} — is ./backups writable by the container user? See README.`
+          `Auto-backup failed: ${err?.message || err} — is the backup location writable? See README.`
         )
       );
     }, hours * 60 * 60 * 1000);
     backupTimer.unref();
+  }
+}
+
+// --- Notifications timer -------------------------------------------------
+// Periodically dispatch due-reminder notifications. NOTIFY_CHECK_HOURS defaults
+// to 24; "0" disables it. It is a no-op (never armed) unless at least one target
+// — NTFY_URL or NOTIFY_WEBHOOK_URL — is configured. Failures are logged but never
+// crash the process, mirroring the auto-backup timer. Unref'd so it never keeps
+// the event loop alive on its own.
+let notifyTimer = null;
+const NOTIFY_CHECK_HOURS = process.env.NOTIFY_CHECK_HOURS ?? '24';
+const hasNotifyTarget = Boolean(process.env.NTFY_URL || process.env.NOTIFY_WEBHOOK_URL);
+if (NOTIFY_CHECK_HOURS !== '0' && hasNotifyTarget) {
+  const notifyHours = Number.parseFloat(NOTIFY_CHECK_HOURS);
+  if (Number.isFinite(notifyHours) && notifyHours > 0) {
+    notifyTimer = setInterval(() => {
+      runNotify(ctx).catch((err) =>
+        console.error(
+          `Notification check failed: ${err?.message || err} — check NTFY_URL/NOTIFY_WEBHOOK_URL. See README.`
+        )
+      );
+    }, notifyHours * 60 * 60 * 1000);
+    notifyTimer.unref();
   }
 }
 
@@ -75,9 +60,10 @@ function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
   if (backupTimer) clearInterval(backupTimer);
-  server.close(() => {
+  if (notifyTimer) clearInterval(notifyTimer);
+  server.close(async () => {
     try {
-      ctx.db.close();
+      await ctx.db.close();
     } catch {
       /* best-effort */
     }

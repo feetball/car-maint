@@ -1,4 +1,24 @@
+import path from 'node:path';
 import request from 'supertest';
+import { createApp } from '../src/app.js';
+
+// Single shared app-construction helper used by every server test file. Keeps the
+// whole suite driver-agnostic: when env DB_DRIVER=libsql it builds the app on the
+// libsql driver backed by a per-dataDir local `file:` database (so each test stays
+// isolated exactly like the default sqlite driver); otherwise it uses the default
+// sqlite driver. Extra createApp options (NHTSA stub bases, etc.) merge in via the
+// second argument.
+export function makeApp(dataDir, options = {}) {
+  const base = { dataDir, ...options };
+  if (process.env.DB_DRIVER === 'libsql') {
+    return createApp({
+      ...base,
+      dbDriver: 'libsql',
+      dbUrl: `file:${path.join(dataDir, 'carmaint.db')}`,
+    });
+  }
+  return createApp(base);
+}
 
 // Minimal valid 1x1 transparent PNG (67 bytes).
 export const PNG_1x1 = Buffer.from(

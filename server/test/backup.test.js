@@ -5,8 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import yauzl from 'yauzl';
 import yazl from 'yazl';
-import { createApp } from '../src/app.js';
-import { makeVehicle, addRecord, addReminder, uploadPhoto, PNG_1x1 } from './helpers.js';
+import { makeApp, makeVehicle, addRecord, addReminder, uploadPhoto, PNG_1x1 } from './helpers.js';
 
 let dataDir;
 let app;
@@ -14,7 +13,7 @@ let dataDir2;
 
 beforeEach(() => {
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'carmaint-'));
-  app = createApp({ dataDir });
+  app = makeApp(dataDir);
 });
 
 afterEach(() => {
@@ -27,7 +26,7 @@ afterEach(() => {
 
 function makeApp2() {
   dataDir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'carmaint2-'));
-  return createApp({ dataDir: dataDir2 });
+  return makeApp(dataDir2);
 }
 
 // supertest binary body parser: collects the raw response bytes into a Buffer.

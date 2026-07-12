@@ -95,9 +95,9 @@ export default function Vehicles() {
             <li key={vehicle.id}>
               <Link to={`/vehicles/${vehicle.id}`} className="vehicle-card">
                 <div className="vehicle-card__media">
-                  {vehicle.primary_photo ? (
+                  {vehicle.primary_photo_url ? (
                     <img
-                      src={`/photos/${vehicle.primary_photo}`}
+                      src={vehicle.primary_photo_url}
                       alt={vehicleTitle(vehicle)}
                       loading="lazy"
                     />

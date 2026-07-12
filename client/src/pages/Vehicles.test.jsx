@@ -20,8 +20,9 @@ const sampleVehicles = [
     current_mileage: 45210,
     notes: null,
     created_at: '2026-01-01 12:00:00',
-    primary_photo: null,
-    photo_count: 0,
+    primary_photo: 'abc123.jpg',
+    primary_photo_url: 'https://blob.example/photos/abc123.jpg',
+    photo_count: 1,
     record_count: 3,
     total_cost: 412.5,
     last_service_date: '2026-06-01',
@@ -40,6 +41,7 @@ const sampleVehicles = [
     notes: null,
     created_at: '2025-12-01 12:00:00',
     primary_photo: null,
+    primary_photo_url: null,
     photo_count: 0,
     record_count: 0,
     total_cost: 0,
@@ -70,6 +72,12 @@ describe('Vehicles page', () => {
     // Nickname used when present, "year make model" fallback otherwise.
     expect(await screen.findByText('Daily Driver')).toBeInTheDocument();
     expect(screen.getByText('2019 Toyota Corolla')).toBeInTheDocument();
+
+    // Card image src comes from primary_photo_url (not a hand-built /photos path).
+    expect(screen.getByAltText('Daily Driver')).toHaveAttribute(
+      'src',
+      'https://blob.example/photos/abc123.jpg'
+    );
 
     // Formatted mileage and totals.
     expect(screen.getByText('45,210 mi')).toBeInTheDocument();
