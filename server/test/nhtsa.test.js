@@ -4,7 +4,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { makeApp, makeVehicle } from './helpers.js';
+import { makeApp, authAgent, makeVehicle } from './helpers.js';
 
 // A local stub for the two NHTSA endpoints the server proxies (vPIC decode +
 // recallsByVehicle). It runs on an ephemeral port, counts hits per endpoint (so
@@ -86,14 +86,16 @@ afterAll(() => {
 
 let dataDir;
 let app;
+let agent;
 
-beforeEach(() => {
+beforeEach(async () => {
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'carmaint-nhtsa-'));
   stub.state.vpicHits = 0;
   stub.state.recallsHits = 0;
   stub.state.vpicFail = false;
   stub.state.recallsFail = false;
   app = makeApp(dataDir, { nhtsaVpicBase: stub.base, nhtsaRecallsBase: stub.base });
+  agent = await authAgent(app);
 });
 
 afterEach(() => {
@@ -102,7 +104,7 @@ afterEach(() => {
 
 describe('GET /api/vin/:vin', () => {
   it('rejects a too-short VIN with 400 without hitting upstream', async () => {
-    const res = await request(app).get('/api/vin/ABC');
+    const res = await agent.get('/api/vin/ABC');
     expect(res.status).toBe(400);
     expect(typeof res.body.error).toBe('string');
     expect(stub.state.vpicHits).toBe(0);
@@ -110,14 +112,14 @@ describe('GET /api/vin/:vin', () => {
 
   it('rejects a VIN containing the letter I with 400', async () => {
     // 17 chars but with an I, which is never used in real VINs.
-    const res = await request(app).get('/api/vin/1HGBH41JXMN109I86');
+    const res = await agent.get('/api/vin/1HGBH41JXMN109I86');
     expect(res.status).toBe(400);
     expect(typeof res.body.error).toBe('string');
     expect(stub.state.vpicHits).toBe(0);
   });
 
   it('decodes a valid VIN and maps the vPIC fields', async () => {
-    const res = await request(app).get('/api/vin/1hgbh41jxmn109186');
+    const res = await agent.get('/api/vin/1hgbh41jxmn109186');
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
       vin: '1HGBH41JXMN109186', // echoed uppercased
@@ -134,7 +136,7 @@ describe('GET /api/vin/:vin', () => {
 
   it('maps an upstream 500 to a 502', async () => {
     stub.state.vpicFail = true;
-    const res = await request(app).get('/api/vin/1HGBH41JXMN109186');
+    const res = await agent.get('/api/vin/1HGBH41JXMN109186');
     expect(res.status).toBe(502);
     expect(typeof res.body.error).toBe('string');
   });
@@ -142,8 +144,8 @@ describe('GET /api/vin/:vin', () => {
 
 describe('GET /api/vehicles/:id/recalls', () => {
   it('fetches and maps recalls on a cold cache', async () => {
-    const v = await makeVehicle(app, { make: 'Toyota', model: 'Corolla', year: 2020 });
-    const res = await request(app).get(`/api/vehicles/${v.id}/recalls`);
+    const v = await makeVehicle(agent, { make: 'Toyota', model: 'Corolla', year: 2020 });
+    const res = await agent.get(`/api/vehicles/${v.id}/recalls`);
     expect(res.status).toBe(200);
     expect(typeof res.body.fetched_at).toBe('string');
     expect(res.body.recalls).toHaveLength(1);
@@ -159,35 +161,35 @@ describe('GET /api/vehicles/:id/recalls', () => {
   });
 
   it('serves a fresh cache on the second call without re-hitting upstream', async () => {
-    const v = await makeVehicle(app);
-    const first = await request(app).get(`/api/vehicles/${v.id}/recalls`);
+    const v = await makeVehicle(agent);
+    const first = await agent.get(`/api/vehicles/${v.id}/recalls`);
     expect(first.status).toBe(200);
     expect(stub.state.recallsHits).toBe(1);
 
-    const second = await request(app).get(`/api/vehicles/${v.id}/recalls`);
+    const second = await agent.get(`/api/vehicles/${v.id}/recalls`);
     expect(second.status).toBe(200);
     expect(stub.state.recallsHits).toBe(1); // cache hit — no new upstream call
     expect(second.body).toEqual(first.body);
   });
 
   it('?refresh=1 bypasses the cache and re-hits upstream', async () => {
-    const v = await makeVehicle(app);
-    await request(app).get(`/api/vehicles/${v.id}/recalls`);
+    const v = await makeVehicle(agent);
+    await agent.get(`/api/vehicles/${v.id}/recalls`);
     expect(stub.state.recallsHits).toBe(1);
 
-    const refreshed = await request(app).get(`/api/vehicles/${v.id}/recalls?refresh=1`);
+    const refreshed = await agent.get(`/api/vehicles/${v.id}/recalls?refresh=1`);
     expect(refreshed.status).toBe(200);
     expect(stub.state.recallsHits).toBe(2);
   });
 
   it('falls back to the warm cache when upstream starts failing', async () => {
-    const v = await makeVehicle(app);
-    const warm = await request(app).get(`/api/vehicles/${v.id}/recalls`);
+    const v = await makeVehicle(agent);
+    const warm = await agent.get(`/api/vehicles/${v.id}/recalls`);
     expect(warm.status).toBe(200);
 
     // Upstream now fails; a forced refresh must fall back to the cached payload.
     stub.state.recallsFail = true;
-    const res = await request(app).get(`/api/vehicles/${v.id}/recalls?refresh=1`);
+    const res = await agent.get(`/api/vehicles/${v.id}/recalls?refresh=1`);
     expect(res.status).toBe(200);
     expect(res.body.recalls).toHaveLength(1);
     expect(res.body.recalls[0].campaign_number).toBe('23V456000');
@@ -195,8 +197,8 @@ describe('GET /api/vehicles/:id/recalls', () => {
 
   it('returns 502 on a cold upstream failure with no cache', async () => {
     stub.state.recallsFail = true;
-    const v = await makeVehicle(app);
-    const res = await request(app).get(`/api/vehicles/${v.id}/recalls`);
+    const v = await makeVehicle(agent);
+    const res = await agent.get(`/api/vehicles/${v.id}/recalls`);
     expect(res.status).toBe(502);
     expect(typeof res.body.error).toBe('string');
   });

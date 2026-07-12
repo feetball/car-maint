@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { asyncHandler, badRequest, getVehicleOr404, notFound } from '../helpers.js';
+import { asyncHandler, badRequest, getOwnedChildOr404, getVehicleOr404 } from '../helpers.js';
 import { SERVICE_TYPE_VALUES } from '../serviceTypes.js';
 import { dueReminders, vehicleReminders } from '../reminderStatus.js';
 
@@ -40,7 +40,7 @@ export function remindersRouter(ctx) {
   router.get(
     '/reminders/due',
     asyncHandler(async (req, res) => {
-      res.json(await dueReminders(ctx.db));
+      res.json(await dueReminders(ctx.db, { userId: req.user.id }));
     })
   );
 
@@ -48,7 +48,7 @@ export function remindersRouter(ctx) {
     '/vehicles/:id/reminders',
     asyncHandler(async (req, res) => {
       const db = ctx.db;
-      const vehicle = await getVehicleOr404(db, req.params.id);
+      const vehicle = await getVehicleOr404(db, req.params.id, req.user.id);
       res.json(await vehicleReminders(db, vehicle));
     })
   );
@@ -57,7 +57,7 @@ export function remindersRouter(ctx) {
     '/vehicles/:id/reminders',
     asyncHandler(async (req, res) => {
       const db = ctx.db;
-      const vehicle = await getVehicleOr404(db, req.params.id);
+      const vehicle = await getVehicleOr404(db, req.params.id, req.user.id);
       const data = validateReminder(req.body ?? {}, false);
       if (data.interval_months == null && data.interval_miles == null) {
         throw badRequest('at least one of interval_months or interval_miles is required');
@@ -83,8 +83,7 @@ export function remindersRouter(ctx) {
     '/reminders/:id',
     asyncHandler(async (req, res) => {
       const db = ctx.db;
-      const reminder = await db.get('SELECT * FROM reminders WHERE id = ?', [req.params.id]);
-      if (!reminder) throw notFound('Reminder not found');
+      const reminder = await getOwnedChildOr404(db, 'reminders', req.params.id, req.user.id, 'Reminder not found');
       const data = validateReminder(req.body ?? {}, true);
       const months = 'interval_months' in data ? data.interval_months : reminder.interval_months;
       const miles = 'interval_miles' in data ? data.interval_miles : reminder.interval_miles;
@@ -107,8 +106,7 @@ export function remindersRouter(ctx) {
     '/reminders/:id',
     asyncHandler(async (req, res) => {
       const db = ctx.db;
-      const reminder = await db.get('SELECT * FROM reminders WHERE id = ?', [req.params.id]);
-      if (!reminder) throw notFound('Reminder not found');
+      const reminder = await getOwnedChildOr404(db, 'reminders', req.params.id, req.user.id, 'Reminder not found');
       await db.run('DELETE FROM reminders WHERE id = ?', [reminder.id]);
       res.status(204).end();
     })

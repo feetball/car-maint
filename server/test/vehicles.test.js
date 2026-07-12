@@ -3,14 +3,16 @@ import request from 'supertest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { makeApp, makeVehicle, addRecord, addReminder, uploadPhoto } from './helpers.js';
+import { makeApp, authAgent, makeVehicle, addRecord, addReminder, uploadPhoto } from './helpers.js';
 
 let dataDir;
 let app;
+let agent;
 
-beforeEach(() => {
+beforeEach(async () => {
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'carmaint-'));
   app = makeApp(dataDir);
+  agent = await authAgent(app);
 });
 
 afterEach(() => {
@@ -19,31 +21,31 @@ afterEach(() => {
 
 describe('POST /api/vehicles validation', () => {
   it('rejects missing make', async () => {
-    const res = await request(app).post('/api/vehicles').send({ model: 'Corolla', year: 2020 });
+    const res = await agent.post('/api/vehicles').send({ model: 'Corolla', year: 2020 });
     expect(res.status).toBe(400);
     expect(typeof res.body.error).toBe('string');
   });
 
   it('rejects empty-string make', async () => {
-    const res = await request(app).post('/api/vehicles').send({ make: '', model: 'Corolla', year: 2020 });
+    const res = await agent.post('/api/vehicles').send({ make: '', model: 'Corolla', year: 2020 });
     expect(res.status).toBe(400);
     expect(typeof res.body.error).toBe('string');
   });
 
   it('rejects missing model', async () => {
-    const res = await request(app).post('/api/vehicles').send({ make: 'Toyota', year: 2020 });
+    const res = await agent.post('/api/vehicles').send({ make: 'Toyota', year: 2020 });
     expect(res.status).toBe(400);
     expect(typeof res.body.error).toBe('string');
   });
 
   it('rejects missing year', async () => {
-    const res = await request(app).post('/api/vehicles').send({ make: 'Toyota', model: 'Corolla' });
+    const res = await agent.post('/api/vehicles').send({ make: 'Toyota', model: 'Corolla' });
     expect(res.status).toBe(400);
     expect(typeof res.body.error).toBe('string');
   });
 
   it('rejects out-of-range year (1800)', async () => {
-    const res = await request(app)
+    const res = await agent
       .post('/api/vehicles')
       .send({ make: 'Toyota', model: 'Corolla', year: 1800 });
     expect(res.status).toBe(400);
@@ -51,7 +53,7 @@ describe('POST /api/vehicles validation', () => {
   });
 
   it('rejects non-integer year ("abc")', async () => {
-    const res = await request(app)
+    const res = await agent
       .post('/api/vehicles')
       .send({ make: 'Toyota', model: 'Corolla', year: 'abc' });
     expect(res.status).toBe(400);
@@ -59,7 +61,7 @@ describe('POST /api/vehicles validation', () => {
   });
 
   it('rejects negative current_mileage', async () => {
-    const res = await request(app)
+    const res = await agent
       .post('/api/vehicles')
       .send({ make: 'Toyota', model: 'Corolla', year: 2020, current_mileage: -5 });
     expect(res.status).toBe(400);
@@ -69,7 +71,7 @@ describe('POST /api/vehicles validation', () => {
 
 describe('POST /api/vehicles', () => {
   it('creates a vehicle with defaults and returns 201', async () => {
-    const res = await request(app)
+    const res = await agent
       .post('/api/vehicles')
       .send({ make: 'Honda', model: 'Civic', year: 2019 });
     expect(res.status).toBe(201);
@@ -84,7 +86,7 @@ describe('POST /api/vehicles', () => {
   });
 
   it('accepts optional fields', async () => {
-    const res = await request(app).post('/api/vehicles').send({
+    const res = await agent.post('/api/vehicles').send({
       name: 'Daily Driver',
       make: 'Mazda',
       model: '3',
@@ -112,14 +114,14 @@ describe('POST /api/vehicles', () => {
 
 describe('GET /api/vehicles', () => {
   it('returns an empty array when there are no vehicles', async () => {
-    const res = await request(app).get('/api/vehicles');
+    const res = await agent.get('/api/vehicles');
     expect(res.status).toBe(200);
     expect(res.body).toEqual([]);
   });
 
   it('returns computed fields with defaults for a bare vehicle', async () => {
-    await makeVehicle(app);
-    const res = await request(app).get('/api/vehicles');
+    await makeVehicle(agent);
+    const res = await agent.get('/api/vehicles');
     expect(res.status).toBe(200);
     expect(res.body).toHaveLength(1);
     const v = res.body[0];
@@ -132,13 +134,13 @@ describe('GET /api/vehicles', () => {
   });
 
   it('computes record aggregates and alert_count', async () => {
-    const v = await makeVehicle(app);
-    await addRecord(app, v.id, { date: '2024-03-01', cost: 50 });
-    await addRecord(app, v.id, { type: 'brake_service', date: '2024-06-15', cost: 25.5 });
+    const v = await makeVehicle(agent);
+    await addRecord(agent, v.id, { date: '2024-03-01', cost: 50 });
+    await addRecord(agent, v.id, { type: 'brake_service', date: '2024-06-15', cost: 25.5 });
     // oil_change last done 2024-03-01, 6-month interval => long overdue => 1 alert
-    await addReminder(app, v.id, { interval_months: 6 });
+    await addReminder(agent, v.id, { interval_months: 6 });
 
-    const res = await request(app).get('/api/vehicles');
+    const res = await agent.get('/api/vehicles');
     expect(res.status).toBe(200);
     const item = res.body[0];
     expect(item.record_count).toBe(2);
@@ -150,11 +152,11 @@ describe('GET /api/vehicles', () => {
   it('lists newest-first, breaking same-second created_at ties by id DESC', async () => {
     // Three vehicles created back-to-back share a created_at second, so the
     // ORDER BY created_at DESC, id DESC tiebreak must return them id-descending.
-    const first = await makeVehicle(app, { make: 'First' });
-    const second = await makeVehicle(app, { make: 'Second' });
-    const third = await makeVehicle(app, { make: 'Third' });
+    const first = await makeVehicle(agent, { make: 'First' });
+    const second = await makeVehicle(agent, { make: 'Second' });
+    const third = await makeVehicle(agent, { make: 'Third' });
 
-    const res = await request(app).get('/api/vehicles');
+    const res = await agent.get('/api/vehicles');
     expect(res.status).toBe(200);
     expect(res.body).toHaveLength(3);
     expect(res.body.map((v) => v.id)).toEqual([third.id, second.id, first.id]);
@@ -162,11 +164,11 @@ describe('GET /api/vehicles', () => {
   });
 
   it('surfaces primary_photo and photo_count for vehicles with photos', async () => {
-    const v = await makeVehicle(app);
-    const primary = (await uploadPhoto(app, v.id, { filename: 'a.png' })).body[0];
-    await uploadPhoto(app, v.id, { filename: 'b.png' });
+    const v = await makeVehicle(agent);
+    const primary = (await uploadPhoto(agent, v.id, { filename: 'a.png' })).body[0];
+    await uploadPhoto(agent, v.id, { filename: 'b.png' });
 
-    const res = await request(app).get('/api/vehicles');
+    const res = await agent.get('/api/vehicles');
     expect(res.status).toBe(200);
     const item = res.body.find((x) => x.id === v.id);
     expect(item.photo_count).toBe(2);
@@ -177,8 +179,8 @@ describe('GET /api/vehicles', () => {
 
 describe('GET /api/vehicles/:id', () => {
   it('returns the vehicle with a photos array', async () => {
-    const v = await makeVehicle(app);
-    const res = await request(app).get(`/api/vehicles/${v.id}`);
+    const v = await makeVehicle(agent);
+    const res = await agent.get(`/api/vehicles/${v.id}`);
     expect(res.status).toBe(200);
     expect(res.body.id).toBe(v.id);
     expect(res.body.make).toBe('Toyota');
@@ -188,15 +190,15 @@ describe('GET /api/vehicles/:id', () => {
   });
 
   it('returns 404 for an unknown id on GET, PUT and DELETE', async () => {
-    const g = await request(app).get('/api/vehicles/99999');
+    const g = await agent.get('/api/vehicles/99999');
     expect(g.status).toBe(404);
     expect(typeof g.body.error).toBe('string');
 
-    const p = await request(app).put('/api/vehicles/99999').send({ name: 'x' });
+    const p = await agent.put('/api/vehicles/99999').send({ name: 'x' });
     expect(p.status).toBe(404);
     expect(typeof p.body.error).toBe('string');
 
-    const d = await request(app).delete('/api/vehicles/99999');
+    const d = await agent.delete('/api/vehicles/99999');
     expect(d.status).toBe(404);
     expect(typeof d.body.error).toBe('string');
   });
@@ -204,8 +206,8 @@ describe('GET /api/vehicles/:id', () => {
 
 describe('PUT /api/vehicles/:id', () => {
   it('partially updates fields and leaves the rest untouched', async () => {
-    const v = await makeVehicle(app);
-    const res = await request(app)
+    const v = await makeVehicle(agent);
+    const res = await agent
       .put(`/api/vehicles/${v.id}`)
       .send({ name: 'Commuter', current_mileage: 12345 });
     expect(res.status).toBe(200);
@@ -217,17 +219,17 @@ describe('PUT /api/vehicles/:id', () => {
   });
 
   it('validates updated fields', async () => {
-    const v = await makeVehicle(app);
+    const v = await makeVehicle(agent);
 
-    const badYearLow = await request(app).put(`/api/vehicles/${v.id}`).send({ year: 1800 });
+    const badYearLow = await agent.put(`/api/vehicles/${v.id}`).send({ year: 1800 });
     expect(badYearLow.status).toBe(400);
     expect(typeof badYearLow.body.error).toBe('string');
 
-    const badYearType = await request(app).put(`/api/vehicles/${v.id}`).send({ year: 'abc' });
+    const badYearType = await agent.put(`/api/vehicles/${v.id}`).send({ year: 'abc' });
     expect(badYearType.status).toBe(400);
     expect(typeof badYearType.body.error).toBe('string');
 
-    const badMake = await request(app).put(`/api/vehicles/${v.id}`).send({ make: '' });
+    const badMake = await agent.put(`/api/vehicles/${v.id}`).send({ make: '' });
     expect(badMake.status).toBe(400);
     expect(typeof badMake.body.error).toBe('string');
   });
@@ -235,14 +237,14 @@ describe('PUT /api/vehicles/:id', () => {
 
 describe('DELETE /api/vehicles/:id', () => {
   it('returns 204 and the vehicle is gone afterwards', async () => {
-    const v = await makeVehicle(app);
-    const del = await request(app).delete(`/api/vehicles/${v.id}`);
+    const v = await makeVehicle(agent);
+    const del = await agent.delete(`/api/vehicles/${v.id}`);
     expect(del.status).toBe(204);
 
-    const after = await request(app).get(`/api/vehicles/${v.id}`);
+    const after = await agent.get(`/api/vehicles/${v.id}`);
     expect(after.status).toBe(404);
 
-    const list = await request(app).get('/api/vehicles');
+    const list = await agent.get('/api/vehicles');
     expect(list.body).toEqual([]);
   });
 });

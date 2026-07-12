@@ -3,7 +3,7 @@ import request from 'supertest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { makeApp, makeVehicle, addRecord, addReminder, today, addMonths } from './helpers.js';
+import { makeApp, authAgent, makeVehicle, addRecord, addReminder, today, addMonths } from './helpers.js';
 import { collectDue, sendNotifications } from '../src/notify.js';
 
 let dataDir;
@@ -41,11 +41,13 @@ function recordingFetch() {
 }
 
 // Seed one reminder that is overdue relative to whatever "today" is when the test
-// runs (record a year ago + 6-month interval → next due 6 months ago).
+// runs (record a year ago + 6-month interval → next due 6 months ago). Owned by a
+// freshly-registered user; collectDue (global) still sees it since it is owned.
 async function seedOverdue(app) {
-  const v = await makeVehicle(app);
-  await addRecord(app, v.id, { type: 'oil_change', date: addMonths(today(), -12), mileage: 1000 });
-  await addReminder(app, v.id, { interval_months: 6 });
+  const agent = await authAgent(app);
+  const v = await makeVehicle(agent);
+  await addRecord(agent, v.id, { type: 'oil_change', date: addMonths(today(), -12), mileage: 1000 });
+  await addReminder(agent, v.id, { interval_months: 6 });
   return v;
 }
 
@@ -63,7 +65,8 @@ describe('collectDue', () => {
 
   it('returns empty buckets when nothing is due', async () => {
     const app = makeApp(dataDir);
-    await makeVehicle(app); // no reminders at all
+    const agent = await authAgent(app);
+    await makeVehicle(agent); // no reminders at all
     const due = await collectDue(app.locals.ctx.db);
     expect(due).toEqual({ overdue: [], due_soon: [] });
   });
@@ -168,7 +171,8 @@ describe('cron routes', () => {
   it('/api/cron/backup with the right bearer produces a listed backup', async () => {
     process.env.CRON_SECRET = SECRET;
     const app = makeApp(dataDir);
-    await makeVehicle(app); // some data to snapshot
+    const agent = await authAgent(app);
+    await makeVehicle(agent); // some data to snapshot
 
     const res = await request(app)
       .get('/api/cron/backup')
@@ -177,7 +181,9 @@ describe('cron routes', () => {
     expect(res.body.ok).toBe(true);
     expect(typeof res.body.filename).toBe('string');
 
-    const list = await request(app).get('/api/backups');
+    // The stored-backups list is a GLOBAL DR endpoint: it needs both a session
+    // (agent) and the CRON_SECRET bearer when CRON_SECRET is set.
+    const list = await agent.get('/api/backups').set('Authorization', `Bearer ${SECRET}`);
     expect(list.status).toBe(200);
     expect(list.body.some((b) => b.filename === res.body.filename)).toBe(true);
   });

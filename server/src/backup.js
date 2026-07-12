@@ -2,8 +2,10 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import Database from 'better-sqlite3';
 import yazl from 'yazl';
 import yauzl from 'yauzl';
+import { SCHEMA_SQL } from './db.js';
 import { badRequest, HttpError } from './helpers.js';
 
 const BACKUP_TABLES = ['vehicles', 'photos', 'records', 'reminders'];
@@ -30,21 +32,107 @@ export function mimeForFilename(filename) {
 }
 
 // Row counts for the manifest / restore response, read through the async facade.
-export async function backupCounts(db) {
-  const count = async (table) => (await db.get(`SELECT COUNT(*) AS n FROM ${table}`)).n;
+// When userId is given the counts cover only that user's vehicle tree (used by the
+// per-user /api/backup); otherwise they cover the whole DB (global cron backup).
+export async function backupCounts(db, userId) {
+  if (userId == null) {
+    const count = async (table) => (await db.get(`SELECT COUNT(*) AS n FROM ${table}`)).n;
+    return {
+      vehicles: await count('vehicles'),
+      records: await count('records'),
+      reminders: await count('reminders'),
+      photos: await count('photos'),
+    };
+  }
+  const child = async (table) =>
+    (
+      await db.get(
+        `SELECT COUNT(*) AS n FROM ${table} c JOIN vehicles v ON v.id = c.vehicle_id WHERE v.user_id = ?`,
+        [userId]
+      )
+    ).n;
   return {
-    vehicles: await count('vehicles'),
-    records: await count('records'),
-    reminders: await count('reminders'),
-    photos: await count('photos'),
+    vehicles: (await db.get('SELECT COUNT(*) AS n FROM vehicles WHERE user_id = ?', [userId])).n,
+    records: await child('records'),
+    reminders: await child('reminders'),
+    photos: await child('photos'),
   };
 }
 
+// Materializes a standalone carmaint.db at destPath containing ONLY the given
+// user's vehicle tree, with vehicles.user_id stripped to NULL (backups never carry
+// account data — restore re-assigns ownership to whoever imports the archive). Rows
+// keep their original ids inside the archive; restore remaps them. Reads go through
+// the async facade (driver-agnostic), writes via a fresh better-sqlite3 file.
+async function buildScopedSnapshot(ctx, userId, destPath) {
+  const vehicles = await ctx.db.all('SELECT * FROM vehicles WHERE user_id = ? ORDER BY id ASC', [
+    userId,
+  ]);
+  const out = new Database(destPath);
+  try {
+    out.exec(SCHEMA_SQL);
+    const insVehicle = out.prepare(
+      `INSERT INTO vehicles
+         (id, user_id, name, make, model, year, vin, license_plate, color, current_mileage, notes, created_at)
+       VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    );
+    const insRecord = out.prepare(
+      `INSERT INTO records
+         (id, vehicle_id, type, description, date, mileage, cost, shop, notes, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    );
+    const insReminder = out.prepare(
+      `INSERT INTO reminders
+         (id, vehicle_id, type, description, interval_months, interval_miles, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    );
+    const insPhoto = out.prepare(
+      `INSERT INTO photos
+         (id, vehicle_id, filename, original_name, is_primary, uploaded_at)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    );
+    for (const v of vehicles) {
+      insVehicle.run(
+        v.id, v.name, v.make, v.model, v.year, v.vin, v.license_plate, v.color,
+        v.current_mileage, v.notes, v.created_at
+      );
+      const records = await ctx.db.all('SELECT * FROM records WHERE vehicle_id = ?', [v.id]);
+      for (const r of records) {
+        insRecord.run(r.id, r.vehicle_id, r.type, r.description, r.date, r.mileage, r.cost, r.shop, r.notes, r.created_at);
+      }
+      const reminders = await ctx.db.all('SELECT * FROM reminders WHERE vehicle_id = ?', [v.id]);
+      for (const rm of reminders) {
+        insReminder.run(rm.id, rm.vehicle_id, rm.type, rm.description, rm.interval_months, rm.interval_miles, rm.created_at);
+      }
+      const photos = await ctx.db.all('SELECT * FROM photos WHERE vehicle_id = ?', [v.id]);
+      for (const p of photos) {
+        insPhoto.run(p.id, p.vehicle_id, p.filename, p.original_name, p.is_primary, p.uploaded_at);
+      }
+    }
+  } finally {
+    out.close();
+  }
+}
+
+// Photo filenames belonging to a user's vehicle tree (used to scope which photo
+// files go into a per-user backup zip).
+async function userPhotoFilenames(ctx, userId) {
+  const rows = await ctx.db.all(
+    `SELECT p.filename FROM photos p JOIN vehicles v ON v.id = p.vehicle_id WHERE v.user_id = ?`,
+    [userId]
+  );
+  return new Set(rows.map((r) => r.filename));
+}
+
 // Writes a zip backup to destPath: manifest.json, a consistent carmaint.db
-// snapshot (built by the active driver — native db.backup() for sqlite, a copied
-// better-sqlite3 file for libsql), and photos/<filename> read from the store.
-// Resolves with destPath. ctx: { db, store, dataDir }.
-export async function createBackupZip(ctx, destPath) {
+// snapshot, and photos/<filename> read from the store. Resolves with destPath.
+// ctx: { db, store, dataDir }.
+//
+// userId given (per-user /api/backup): the snapshot holds ONLY that user's vehicle
+// tree (ownership stripped) and only that user's photo files.
+// userId omitted (global cron backup): a whole-DB snapshot built by the active
+// driver (native db.backup() for sqlite, a copied file for libsql) plus every photo.
+export async function createBackupZip(ctx, destPath, userId) {
   const tmpSnapshot = path.join(ctx.dataDir, `.snapshot-${crypto.randomUUID()}.db`);
   const cleanup = () => {
     try {
@@ -55,17 +143,20 @@ export async function createBackupZip(ctx, destPath) {
   };
 
   try {
-    await ctx.db.snapshot(tmpSnapshot);
+    if (userId == null) await ctx.db.snapshot(tmpSnapshot);
+    else await buildScopedSnapshot(ctx, userId, tmpSnapshot);
 
     const manifest = {
       app: 'carmaint',
       version: 1,
       exported_at: new Date().toISOString(),
-      counts: await backupCounts(ctx.db),
+      counts: await backupCounts(ctx.db, userId),
     };
 
-    // Pull photo bytes from the store (disk read or blob fetch) up front.
-    const photoNames = await ctx.store.list();
+    // Pull photo bytes from the store (disk read or blob fetch) up front, scoped to
+    // the user's own photos for a per-user backup.
+    const allowed = userId == null ? null : await userPhotoFilenames(ctx, userId);
+    const photoNames = (await ctx.store.list()).filter((n) => allowed == null || allowed.has(n));
     const photos = [];
     for (const name of photoNames) {
       try {

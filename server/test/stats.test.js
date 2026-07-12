@@ -3,14 +3,16 @@ import request from 'supertest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { makeApp, makeVehicle, addRecord, addReminder } from './helpers.js';
+import { makeApp, authAgent, makeVehicle, addRecord, addReminder } from './helpers.js';
 
 let dataDir;
 let app;
+let agent;
 
-beforeEach(() => {
+beforeEach(async () => {
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'carmaint-'));
   app = makeApp(dataDir);
+  agent = await authAgent(app);
 });
 
 afterEach(() => {
@@ -19,13 +21,13 @@ afterEach(() => {
 
 describe('GET /api/vehicles/:id/stats', () => {
   it('computes totals, cost_by_type (total DESC) and cost_by_year (year ASC); null cost counts as 0', async () => {
-    const v = await makeVehicle(app);
-    await addRecord(app, v.id, { type: 'oil_change', date: '2023-05-01', cost: 50 });
-    await addRecord(app, v.id, { type: 'oil_change', date: '2024-02-01', cost: 30 });
-    await addRecord(app, v.id, { type: 'brake_service', date: '2024-03-01', cost: 200 });
-    await addRecord(app, v.id, { type: 'inspection', date: '2023-08-01' }); // null cost
+    const v = await makeVehicle(agent);
+    await addRecord(agent, v.id, { type: 'oil_change', date: '2023-05-01', cost: 50 });
+    await addRecord(agent, v.id, { type: 'oil_change', date: '2024-02-01', cost: 30 });
+    await addRecord(agent, v.id, { type: 'brake_service', date: '2024-03-01', cost: 200 });
+    await addRecord(agent, v.id, { type: 'inspection', date: '2023-08-01' }); // null cost
 
-    const res = await request(app).get(`/api/vehicles/${v.id}/stats`);
+    const res = await agent.get(`/api/vehicles/${v.id}/stats`);
     expect(res.status).toBe(200);
     expect(res.body.total_cost).toBe(280);
     expect(res.body.record_count).toBe(4);
@@ -45,8 +47,8 @@ describe('GET /api/vehicles/:id/stats', () => {
   });
 
   it('returns zeros/empty arrays for a vehicle with no records', async () => {
-    const v = await makeVehicle(app);
-    const res = await request(app).get(`/api/vehicles/${v.id}/stats`);
+    const v = await makeVehicle(agent);
+    const res = await agent.get(`/api/vehicles/${v.id}/stats`);
     expect(res.status).toBe(200);
     expect(res.body.total_cost).toBe(0);
     expect(res.body.record_count).toBe(0);
@@ -57,19 +59,19 @@ describe('GET /api/vehicles/:id/stats', () => {
 
 describe('GET /api/dashboard', () => {
   it('reports counts, total cost, recent records (max 10) and due reminders', async () => {
-    const v1 = await makeVehicle(app, { name: 'Truck', make: 'Ford', model: 'F-150', year: 2021 });
-    const v2 = await makeVehicle(app, { make: 'Mazda', model: '3', year: 2017 }); // no name -> fallback
+    const v1 = await makeVehicle(agent, { name: 'Truck', make: 'Ford', model: 'F-150', year: 2021 });
+    const v2 = await makeVehicle(agent, { make: 'Mazda', model: '3', year: 2017 }); // no name -> fallback
 
     // 12 records, unique ascending dates, cost 10 each, alternating vehicles
     // (odd day -> v1, even day -> v2).
     for (let i = 1; i <= 12; i++) {
       const day = String(i).padStart(2, '0');
-      await addRecord(app, i % 2 ? v1.id : v2.id, { date: `2024-01-${day}`, cost: 10 });
+      await addRecord(agent, i % 2 ? v1.id : v2.id, { date: `2024-01-${day}`, cost: 10 });
     }
     // oil_change last done Jan 2024 with a 6-month interval -> overdue
-    await addReminder(app, v1.id, { interval_months: 6 });
+    await addReminder(agent, v1.id, { interval_months: 6 });
 
-    const res = await request(app).get('/api/dashboard');
+    const res = await agent.get('/api/dashboard');
     expect(res.status).toBe(200);
     expect(res.body.vehicle_count).toBe(2);
     expect(res.body.record_count).toBe(12);
@@ -92,7 +94,7 @@ describe('GET /api/dashboard', () => {
   });
 
   it('returns an empty dashboard shape with no data', async () => {
-    const res = await request(app).get('/api/dashboard');
+    const res = await agent.get('/api/dashboard');
     expect(res.status).toBe(200);
     expect(res.body.vehicle_count).toBe(0);
     expect(res.body.record_count).toBe(0);
@@ -104,7 +106,7 @@ describe('GET /api/dashboard', () => {
 
 describe('GET /api/service-types', () => {
   it('returns the 17 service types in the specified order', async () => {
-    const res = await request(app).get('/api/service-types');
+    const res = await agent.get('/api/service-types');
     expect(res.status).toBe(200);
     expect(res.body).toHaveLength(17);
     expect(res.body[0]).toEqual({ value: 'oil_change', label: 'Oil Change' });

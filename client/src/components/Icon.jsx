@@ -180,6 +180,12 @@ const ICONS = {
       <line x1="21" y1="12" x2="9" y2="12" />
     </>
   ),
+  user: (
+    <>
+      <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+      <circle cx="12" cy="7" r="4" />
+    </>
+  ),
   copy: (
     <>
       <rect x="9" y="9" width="13" height="13" rx="2" />

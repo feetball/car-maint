@@ -56,7 +56,7 @@ export function recallsRouter(ctx) {
     '/vehicles/:id/recalls',
     asyncHandler(async (req, res) => {
       const db = ctx.db;
-      const vehicle = await getVehicleOr404(db, req.params.id);
+      const vehicle = await getVehicleOr404(db, req.params.id, req.user.id);
       const refresh = req.query.refresh === '1';
 
       const cached = await db.get('SELECT * FROM recalls_cache WHERE vehicle_id = ?', [vehicle.id]);

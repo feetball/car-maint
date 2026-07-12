@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { asyncHandler, badRequest, getVehicleOr404, notFound } from '../helpers.js';
+import { asyncHandler, badRequest, getOwnedChildOr404, getVehicleOr404 } from '../helpers.js';
 import { isValidDateString } from '../dates.js';
 import { SERVICE_TYPE_VALUES } from '../serviceTypes.js';
 
@@ -53,7 +53,7 @@ export function recordsRouter(ctx) {
     '/vehicles/:id/records',
     asyncHandler(async (req, res) => {
       const db = ctx.db;
-      const vehicle = await getVehicleOr404(db, req.params.id);
+      const vehicle = await getVehicleOr404(db, req.params.id, req.user.id);
       const type =
         typeof req.query.type === 'string' && req.query.type !== '' ? req.query.type : null;
       const rows = type
@@ -72,7 +72,7 @@ export function recordsRouter(ctx) {
     '/vehicles/:id/records',
     asyncHandler(async (req, res) => {
       const db = ctx.db;
-      const vehicle = await getVehicleOr404(db, req.params.id);
+      const vehicle = await getVehicleOr404(db, req.params.id, req.user.id);
       const data = validateRecord(req.body ?? {}, false);
       const info = await db.run(
         `INSERT INTO records (vehicle_id, type, description, date, mileage, cost, shop, notes)
@@ -101,8 +101,7 @@ export function recordsRouter(ctx) {
     '/records/:id',
     asyncHandler(async (req, res) => {
       const db = ctx.db;
-      const record = await db.get('SELECT * FROM records WHERE id = ?', [req.params.id]);
-      if (!record) throw notFound('Record not found');
+      const record = await getOwnedChildOr404(db, 'records', req.params.id, req.user.id, 'Record not found');
       const data = validateRecord(req.body ?? {}, true);
       const keys = Object.keys(data);
       if (keys.length > 0) {
@@ -121,8 +120,7 @@ export function recordsRouter(ctx) {
     '/records/:id',
     asyncHandler(async (req, res) => {
       const db = ctx.db;
-      const record = await db.get('SELECT * FROM records WHERE id = ?', [req.params.id]);
-      if (!record) throw notFound('Record not found');
+      const record = await getOwnedChildOr404(db, 'records', req.params.id, req.user.id, 'Record not found');
       await db.run('DELETE FROM records WHERE id = ?', [record.id]);
       res.status(204).end();
     })

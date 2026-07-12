@@ -29,22 +29,23 @@ function NotFound() {
 }
 
 export default function App() {
-  // null = still checking; otherwise { required, authenticated }.
+  // null = still checking; otherwise { authenticated, username? }. Auth is always
+  // required now (multi-user accounts), so there is no "auth disabled" path.
   const [authState, setAuthState] = useState(null);
 
   const refreshStatus = useCallback(async () => {
     try {
-      setAuthState(await api.authStatus());
+      const status = await api.authStatus();
+      setAuthState({ authenticated: Boolean(status.authenticated), username: status.username });
     } catch {
-      // Status endpoint unreachable — fail open so the offline Docker app (which
-      // has no auth) still renders exactly as before.
-      setAuthState({ required: false, authenticated: true });
+      // Status endpoint unreachable — fail closed to the login gate.
+      setAuthState({ authenticated: false });
     }
   }, []);
 
   useEffect(() => {
     // Any 401 from the api helper flips the whole app back to the login gate.
-    setUnauthorizedHandler(() => setAuthState({ required: true, authenticated: false }));
+    setUnauthorizedHandler(() => setAuthState({ authenticated: false }));
     refreshStatus();
     return () => setUnauthorizedHandler(null);
   }, [refreshStatus]);
@@ -55,7 +56,7 @@ export default function App() {
     } catch {
       /* clear locally regardless of the server's response */
     }
-    setAuthState({ required: true, authenticated: false });
+    setAuthState({ authenticated: false });
   }
 
   if (!authState) {
@@ -66,11 +67,9 @@ export default function App() {
     );
   }
 
-  if (authState.required && !authState.authenticated) {
+  if (!authState.authenticated) {
     return <LoginView onAuthenticated={refreshStatus} />;
   }
-
-  const authRequired = Boolean(authState.required);
 
   return (
     <div className="app-shell">
@@ -95,12 +94,23 @@ export default function App() {
             <span>Backup</span>
           </NavLink>
         </nav>
-        {authRequired && (
+        <div className="sidebar__account">
+          {authState.username && (
+            <div className="account-chip" title={`Signed in as ${authState.username}`}>
+              <span className="account-chip__icon" aria-hidden="true">
+                <Icon name="user" size={16} />
+              </span>
+              <span className="account-chip__text">
+                <span className="account-chip__label">Signed in as</span>
+                <span className="account-chip__name">{authState.username}</span>
+              </span>
+            </div>
+          )}
           <button type="button" className="nav-link logout-button" onClick={handleLogout}>
             <Icon name="log-out" size={17} />
             <span>Log out</span>
           </button>
-        )}
+        </div>
         <p className="sidebar__footer">Every mile, accounted for.</p>
       </aside>
       <main className="app-main">

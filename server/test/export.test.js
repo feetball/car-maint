@@ -3,14 +3,16 @@ import request from 'supertest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { makeApp, makeVehicle, addRecord } from './helpers.js';
+import { makeApp, authAgent, makeVehicle, addRecord } from './helpers.js';
 
 let dataDir;
 let app;
+let agent;
 
-beforeEach(() => {
+beforeEach(async () => {
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'carmaint-'));
   app = makeApp(dataDir);
+  agent = await authAgent(app);
 });
 
 afterEach(() => {
@@ -21,8 +23,8 @@ const HEADER = 'date,type,mileage,cost,shop,description,notes';
 
 describe('GET /api/vehicles/:id/export.csv', () => {
   it('exports records as CSV, date ASC, with the right headers', async () => {
-    const v = await makeVehicle(app);
-    await addRecord(app, v.id, {
+    const v = await makeVehicle(agent);
+    await addRecord(agent, v.id, {
       type: 'oil_change',
       date: '2024-05-01',
       mileage: 12000,
@@ -30,9 +32,9 @@ describe('GET /api/vehicles/:id/export.csv', () => {
       shop: "Joe's Garage",
       description: 'Standard oil change',
     });
-    await addRecord(app, v.id, { type: 'repair', date: '2024-01-15' });
+    await addRecord(agent, v.id, { type: 'repair', date: '2024-01-15' });
 
-    const res = await request(app).get(`/api/vehicles/${v.id}/export.csv`);
+    const res = await agent.get(`/api/vehicles/${v.id}/export.csv`);
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toMatch(/text\/csv/);
     expect(res.headers['content-disposition']).toMatch(/attachment/);
@@ -54,14 +56,14 @@ describe('GET /api/vehicles/:id/export.csv', () => {
   });
 
   it('quotes fields containing quotes, commas and newlines, doubling embedded quotes', async () => {
-    const v = await makeVehicle(app);
-    await addRecord(app, v.id, {
+    const v = await makeVehicle(agent);
+    await addRecord(agent, v.id, {
       type: 'repair',
       date: '2024-01-15',
       notes: 'he said "hi", ok\nsecond line',
     });
 
-    const res = await request(app).get(`/api/vehicles/${v.id}/export.csv`);
+    const res = await agent.get(`/api/vehicles/${v.id}/export.csv`);
     expect(res.status).toBe(200);
 
     // Whole quoted field, with " doubled and the newline preserved inside the quotes.
@@ -71,8 +73,8 @@ describe('GET /api/vehicles/:id/export.csv', () => {
   });
 
   it('exports just the header row for a vehicle with no records', async () => {
-    const v = await makeVehicle(app);
-    const res = await request(app).get(`/api/vehicles/${v.id}/export.csv`);
+    const v = await makeVehicle(agent);
+    const res = await agent.get(`/api/vehicles/${v.id}/export.csv`);
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toMatch(/text\/csv/);
     expect(res.text.split(/\r?\n/)[0]).toBe(HEADER);

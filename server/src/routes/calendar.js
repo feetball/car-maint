@@ -35,17 +35,26 @@ function icsDateTimeUTC(d) {
 
 const icsDate = (ymd) => ymd.replace(/-/g, '');
 
-// GET /calendar.ics — an all-day VEVENT for every reminder that has a computable
-// next_due_date. Token-gated when auth is enabled (cookies aren't usable by
-// calendar subscribers); public when auth is disabled.
+// GET /calendar.ics — an all-day VEVENT for every reminder (belonging to the
+// token's owner) that has a computable next_due_date. Per-user token-gated: the
+// high-entropy calendar_token identifies the user via the indexed users column
+// (cookies aren't usable by calendar subscribers). Only that user's vehicles emit
+// events; an unknown/missing token is a 401.
 export function calendarHandler(ctx) {
   return asyncHandler(async (req, res) => {
-    if (!ctx.auth.verifyCalendarToken(req.query.token)) {
+    const db = ctx.db;
+    const token = req.query.token;
+    const user =
+      typeof token === 'string' && token
+        ? await db.get('SELECT id FROM users WHERE calendar_token = ?', [token])
+        : undefined;
+    if (!user) {
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const db = ctx.db;
-    const vehicles = await db.all('SELECT * FROM vehicles ORDER BY id ASC');
+    const vehicles = await db.all('SELECT * FROM vehicles WHERE user_id = ? ORDER BY id ASC', [
+      user.id,
+    ]);
     const dtstamp = icsDateTimeUTC(new Date());
 
     const lines = [

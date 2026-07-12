@@ -50,9 +50,17 @@ export async function alertCount(db, vehicle, todayStr = today()) {
   return reminders.filter((r) => r.status === 'overdue' || r.status === 'due_soon').length;
 }
 
-export async function dueReminders(db, todayStr = today()) {
+// Aggregates due/overdue reminders across vehicles. Scope is controlled by opts:
+//   { userId }         → only that user's vehicles (per-user endpoints)
+//   {} (userId absent) → every OWNED vehicle (user_id NOT NULL) across all users,
+//                        used by the global notify cron; NULL-owned legacy vehicles
+//                        are never included.
+export async function dueReminders(db, { todayStr = today(), userId } = {}) {
   const due = [];
-  const vehicles = await db.all('SELECT * FROM vehicles ORDER BY id ASC');
+  const vehicles =
+    userId != null
+      ? await db.all('SELECT * FROM vehicles WHERE user_id = ? ORDER BY id ASC', [userId])
+      : await db.all('SELECT * FROM vehicles WHERE user_id IS NOT NULL ORDER BY id ASC');
   for (const vehicle of vehicles) {
     for (const reminder of await vehicleReminders(db, vehicle, todayStr)) {
       if (reminder.status === 'overdue' || reminder.status === 'due_soon') {

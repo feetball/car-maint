@@ -16,7 +16,7 @@ export function miscRouter(ctx) {
     '/vehicles/:id/stats',
     asyncHandler(async (req, res) => {
       const db = ctx.db;
-      const vehicle = await getVehicleOr404(db, req.params.id);
+      const vehicle = await getVehicleOr404(db, req.params.id, req.user.id);
       const totals = await db.get(
         `SELECT COUNT(*) AS record_count, COALESCE(SUM(COALESCE(cost, 0)), 0) AS total_cost
          FROM records WHERE vehicle_id = ?`,
@@ -47,15 +47,23 @@ export function miscRouter(ctx) {
     '/dashboard',
     asyncHandler(async (req, res) => {
       const db = ctx.db;
-      const { vehicle_count } = await db.get('SELECT COUNT(*) AS vehicle_count FROM vehicles');
+      const me = req.user.id;
+      const { vehicle_count } = await db.get(
+        'SELECT COUNT(*) AS vehicle_count FROM vehicles WHERE user_id = ?',
+        [me]
+      );
       const totals = await db.get(
-        'SELECT COUNT(*) AS record_count, COALESCE(SUM(COALESCE(cost, 0)), 0) AS total_cost FROM records'
+        `SELECT COUNT(*) AS record_count, COALESCE(SUM(COALESCE(r.cost, 0)), 0) AS total_cost
+           FROM records r JOIN vehicles v ON v.id = r.vehicle_id WHERE v.user_id = ?`,
+        [me]
       );
       const recent = (
         await db.all(
           `SELECT r.*, v.name AS v_name, v.year AS v_year, v.make AS v_make, v.model AS v_model
            FROM records r JOIN vehicles v ON v.id = r.vehicle_id
-           ORDER BY r.date DESC, r.id DESC LIMIT 10`
+           WHERE v.user_id = ?
+           ORDER BY r.date DESC, r.id DESC LIMIT 10`,
+          [me]
         )
       ).map(({ v_name, v_year, v_make, v_model, ...record }) => ({
         ...record,
@@ -65,7 +73,7 @@ export function miscRouter(ctx) {
         vehicle_count,
         record_count: totals.record_count,
         total_cost: totals.total_cost,
-        due_reminders: await dueReminders(db),
+        due_reminders: await dueReminders(db, { userId: me }),
         recent_records: recent,
       });
     })
@@ -75,7 +83,7 @@ export function miscRouter(ctx) {
     '/vehicles/:id/export.csv',
     asyncHandler(async (req, res) => {
       const db = ctx.db;
-      const vehicle = await getVehicleOr404(db, req.params.id);
+      const vehicle = await getVehicleOr404(db, req.params.id, req.user.id);
       const records = await db.all(
         'SELECT * FROM records WHERE vehicle_id = ? ORDER BY date ASC, id ASC',
         [vehicle.id]

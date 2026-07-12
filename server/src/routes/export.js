@@ -15,7 +15,9 @@ export function exportRouter(ctx) {
         `SELECT r.date, r.type, r.mileage, r.cost, r.shop, r.description, r.notes,
                 v.name AS v_name, v.year AS v_year, v.make AS v_make, v.model AS v_model
          FROM records r JOIN vehicles v ON v.id = r.vehicle_id
-         ORDER BY r.date ASC, r.id ASC`
+         WHERE v.user_id = ?
+         ORDER BY r.date ASC, r.id ASC`,
+        [req.user.id]
       );
       const lines = [CSV_HEADER.join(',')];
       for (const row of rows) {
@@ -42,7 +44,10 @@ export function exportRouter(ctx) {
     '/export.json',
     asyncHandler(async (req, res) => {
       const db = ctx.db;
-      const vehicles = await db.all('SELECT * FROM vehicles ORDER BY created_at DESC, id DESC');
+      const vehicles = await db.all(
+        'SELECT * FROM vehicles WHERE user_id = ? ORDER BY created_at DESC, id DESC',
+        [req.user.id]
+      );
       const out = [];
       for (const vehicle of vehicles) {
         out.push({

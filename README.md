@@ -86,8 +86,9 @@ Set these environment variables in the Vercel project:
 | `TURSO_DATABASE_URL` | your `libsql://…` URL |
 | `TURSO_AUTH_TOKEN` | your Turso token |
 | `BLOB_READ_WRITE_TOKEN` | (auto-set by the Blob store) |
-| `APP_PASSWORD` | **set this** — a Vercel deployment is on the public internet |
-| `CRON_SECRET` | any random string; guards the daily backup/notification crons |
+| `CRON_SECRET` | any random string; guards the daily backup/notification crons and the global backup-download endpoints |
+
+Authentication is built in: users register their own username + password (open signup) and each account only ever sees its own vehicles — no `APP_PASSWORD`/`AUTH_SECRET` to set. Auth is always on.
 
 The bundled `vercel.json` builds the SPA, routes `/api/*`, `/photos/*`, and `/calendar.ics` to the serverless function, and schedules daily backup + due-service-notification crons. Docker remains the primary path and needs none of these variables.
 

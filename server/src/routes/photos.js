@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { Router } from 'express';
 import multer from 'multer';
-import { HttpError, asyncHandler, badRequest, getVehicleOr404, notFound, withPhotoUrl } from '../helpers.js';
+import { HttpError, asyncHandler, badRequest, getOwnedChildOr404, getVehicleOr404, withPhotoUrl } from '../helpers.js';
 
 const EXT_BY_MIMETYPE = {
   'image/jpeg': 'jpg',
@@ -31,7 +31,7 @@ export function photosRouter(ctx) {
   router.post(
     '/vehicles/:id/photos',
     asyncHandler(async (req, res, next) => {
-      req.vehicle = await getVehicleOr404(ctx.db, req.params.id);
+      req.vehicle = await getVehicleOr404(ctx.db, req.params.id, req.user.id);
       next();
     }),
     upload.array('photos', 10),
@@ -92,8 +92,7 @@ export function photosRouter(ctx) {
     '/photos/:id/primary',
     asyncHandler(async (req, res) => {
       const db = ctx.db;
-      const photo = await db.get('SELECT * FROM photos WHERE id = ?', [req.params.id]);
-      if (!photo) throw notFound('Photo not found');
+      const photo = await getOwnedChildOr404(db, 'photos', req.params.id, req.user.id, 'Photo not found');
       await db.tx(async (t) => {
         await t.run('UPDATE photos SET is_primary = 0 WHERE vehicle_id = ?', [photo.vehicle_id]);
         await t.run('UPDATE photos SET is_primary = 1 WHERE id = ?', [photo.id]);
@@ -106,8 +105,7 @@ export function photosRouter(ctx) {
     '/photos/:id',
     asyncHandler(async (req, res) => {
       const db = ctx.db;
-      const photo = await db.get('SELECT * FROM photos WHERE id = ?', [req.params.id]);
-      if (!photo) throw notFound('Photo not found');
+      const photo = await getOwnedChildOr404(db, 'photos', req.params.id, req.user.id, 'Photo not found');
       // Commit the delete + primary promotion in ONE transaction first, then remove
       // the file best-effort: a failed delete must never 500 nor skip the promotion.
       await db.tx(async (t) => {

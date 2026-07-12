@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { createClient } from '@libsql/client';
-import { createDb, SCHEMA_SQL, SCHEMA_STATEMENTS } from '../db.js';
+import { createDb, MIGRATIONS, SCHEMA_SQL, SCHEMA_STATEMENTS } from '../db.js';
 
 // Async data facade. app.js constructs this synchronously (createApp stays sync),
 // but every method is async and awaits a `ready` promise first, so schema init can
@@ -31,8 +31,9 @@ import { createDb, SCHEMA_SQL, SCHEMA_STATEMENTS } from '../db.js';
 
 // Tables copied when building a snapshot from the libsql driver. Order is
 // parent-before-child; foreign keys are not enforced on the fresh snapshot db so
-// order only needs to be stable.
-const SNAPSHOT_TABLES = ['vehicles', 'photos', 'records', 'reminders', 'recalls_cache'];
+// order only needs to be stable. `users` is included so a global (cron) snapshot
+// captures accounts (the sqlite driver's native db.backup() already copies them).
+const SNAPSHOT_TABLES = ['users', 'vehicles', 'photos', 'records', 'reminders', 'recalls_cache'];
 
 // Callers pass bind params as an array (or omit them). Normalize to an array and
 // coerce `undefined` (which better-sqlite3 rejects and libsql disallows) to null.
@@ -133,9 +134,29 @@ function createLibsqlFacade({ url, authToken }) {
     }
   }
   const client = createClient({ url, authToken });
-  // libsql runs one statement per execute(), so init the schema statement-by-statement.
+  // libsql runs one statement per execute(), so init the schema statement-by-statement,
+  // then apply the idempotent column migrations (equivalent to db.js runMigrations,
+  // but async): PRAGMA table_info per table, ALTER only when the column is missing.
+  const columnNames = async (table) => {
+    const rs = await client.execute(`PRAGMA table_info(${table})`);
+    const nameIdx = rs.columns.indexOf('name');
+    return rs.rows.map((r) => r[nameIdx]);
+  };
   const ready = (async () => {
     for (const stmt of SCHEMA_STATEMENTS) await client.execute(stmt);
+    for (const m of MIGRATIONS) {
+      if ((await columnNames(m.table)).includes(m.column)) continue;
+      // Concurrency-safe: two cold-start instances can both see the column missing
+      // and both ALTER; the loser gets "duplicate column name". Swallow that ONLY
+      // after re-confirming the column now exists — `ready` must not reject for a
+      // benign lost race (which would 500 every request for this instance's life).
+      try {
+        await client.execute(m.sql);
+      } catch (err) {
+        if (!/duplicate column name/i.test(err?.message || '')) throw err;
+        if (!(await columnNames(m.table)).includes(m.column)) throw err;
+      }
+    }
   })();
   // Mark a pre-request init failure (e.g. Turso auth/network) as handled so it can't
   // fire unhandledRejection and kill the process; awaiters still get the rejection.

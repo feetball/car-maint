@@ -5,15 +5,17 @@ import os from 'node:os';
 import path from 'node:path';
 import yauzl from 'yauzl';
 import yazl from 'yazl';
-import { makeApp, makeVehicle, addRecord, addReminder, uploadPhoto, PNG_1x1 } from './helpers.js';
+import { makeApp, authAgent, makeVehicle, addRecord, addReminder, uploadPhoto, PNG_1x1 } from './helpers.js';
 
 let dataDir;
 let app;
+let agent;
 let dataDir2;
 
-beforeEach(() => {
+beforeEach(async () => {
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'carmaint-'));
   app = makeApp(dataDir);
+  agent = await authAgent(app);
 });
 
 afterEach(() => {
@@ -24,9 +26,13 @@ afterEach(() => {
   }
 });
 
-function makeApp2() {
+// A second app on its own dataDir plus a fresh authenticated agent (a different
+// user), for restore/isolation round-trips.
+async function makeApp2() {
   dataDir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'carmaint2-'));
-  return makeApp(dataDir2);
+  const app2 = makeApp(dataDir2);
+  const agent2 = await authAgent(app2);
+  return { app2, agent2 };
 }
 
 // supertest binary body parser: collects the raw response bytes into a Buffer.
@@ -164,19 +170,20 @@ function buildRawZip(entries) {
   return Buffer.concat([...localParts, central, eocd]);
 }
 
-// Seed one of everything and return the raw backup zip Buffer plus the photo row.
-async function seedAndBackup(a = app) {
+// Seed one of everything (owned by agent `a`) and return the raw backup zip Buffer
+// plus the photo row.
+async function seedAndBackup(a = agent) {
   const v = await makeVehicle(a, { name: 'Backup Rig', current_mileage: 42000 });
   await addRecord(a, v.id, { date: '2024-01-01', cost: 20, mileage: 41000 });
   await addReminder(a, v.id, { interval_months: 6 });
   const photo = (await uploadPhoto(a, v.id)).body[0];
-  const res = await downloadBuffer(request(a).get('/api/backup'));
+  const res = await downloadBuffer(a.get('/api/backup'));
   return { v, photo, res };
 }
 
 // Reusable valid manifest.json + carmaint.db buffers, extracted from a real backup.
 async function goodParts() {
-  const { photo, res } = await seedAndBackup(app);
+  const { photo, res } = await seedAndBackup(agent);
   const entries = await readZipEntries(res.body);
   return {
     manifest: entries.get('manifest.json'),
@@ -187,8 +194,8 @@ async function goodParts() {
 
 describe('GET /api/backup', () => {
   it('returns an application/zip attachment named carmaint-backup-<date>.zip', async () => {
-    await seedAndBackup(app);
-    const res = await downloadBuffer(request(app).get('/api/backup'));
+    await seedAndBackup(agent);
+    const res = await downloadBuffer(agent.get('/api/backup'));
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toMatch(/application\/zip/);
     expect(res.headers['content-disposition']).toMatch(/attachment/);
@@ -198,7 +205,7 @@ describe('GET /api/backup', () => {
   });
 
   it('zip contains manifest.json with app/version and correct counts', async () => {
-    const { res } = await seedAndBackup(app);
+    const { res } = await seedAndBackup(agent);
     const entries = await readZipEntries(res.body);
     expect(entries.has('manifest.json')).toBe(true);
 
@@ -210,7 +217,7 @@ describe('GET /api/backup', () => {
   });
 
   it('zip contains carmaint.db and photos/<filename> for an uploaded photo', async () => {
-    const { photo, res } = await seedAndBackup(app);
+    const { photo, res } = await seedAndBackup(agent);
     const entries = await readZipEntries(res.body);
 
     expect(entries.has('carmaint.db')).toBe(true);
@@ -223,29 +230,30 @@ describe('GET /api/backup', () => {
 });
 
 describe('POST /api/restore round-trip', () => {
-  it('restores vehicles, records and photo files into a second app', async () => {
-    const { v, photo, res } = await seedAndBackup(app);
-    const app2 = makeApp2();
+  it('imports vehicles, records and photo files into the restoring user account', async () => {
+    const { photo, res } = await seedAndBackup(agent);
+    const { agent2 } = await makeApp2();
 
-    const restore = await request(app2)
+    const restore = await agent2
       .post('/api/restore')
       .attach('backup', res.body, { filename: 'backup.zip', contentType: 'application/zip' });
     expect(restore.status).toBe(200);
     expect(restore.body).toMatchObject({ restored: true });
 
-    const list = await request(app2).get('/api/vehicles');
+    const list = await agent2.get('/api/vehicles');
     expect(list.status).toBe(200);
     expect(list.body).toHaveLength(1);
-    expect(list.body[0].id).toBe(v.id);
-    expect(list.body[0].name).toBe('Backup Rig');
-    expect(list.body[0].photo_count).toBe(1);
+    // Restore is additive with fresh ids owned by the importer; match on content.
+    const imported = list.body[0];
+    expect(imported.name).toBe('Backup Rig');
+    expect(imported.photo_count).toBe(1);
 
-    const records = await request(app2).get(`/api/vehicles/${v.id}/records`);
+    const records = await agent2.get(`/api/vehicles/${imported.id}/records`);
     expect(records.body).toHaveLength(1);
     expect(records.body[0].date).toBe('2024-01-01');
 
-    // The restored photo file is on disk in app2 and served with the original bytes.
-    const served = await downloadBuffer(request(app2).get(`/photos/${photo.filename}`));
+    // The restored photo file is served (to its new owner) with the original bytes.
+    const served = await downloadBuffer(agent2.get(`/photos/${photo.filename}`));
     expect(served.status).toBe(200);
     expect(Buffer.compare(served.body, PNG_1x1)).toBe(0);
   });
@@ -253,16 +261,16 @@ describe('POST /api/restore round-trip', () => {
 
 describe('POST /api/restore rejections leave target data untouched', () => {
   async function expectRejected(zipBuffer) {
-    const app2 = makeApp2();
-    const keep = await makeVehicle(app2, { name: 'KEEP ME' });
+    const { agent2 } = await makeApp2();
+    const keep = await makeVehicle(agent2, { name: 'KEEP ME' });
 
-    const restore = await request(app2)
+    const restore = await agent2
       .post('/api/restore')
       .attach('backup', zipBuffer, { filename: 'bad.zip', contentType: 'application/zip' });
     expect(restore.status).toBe(400);
     expect(typeof restore.body.error).toBe('string');
 
-    const after = await request(app2).get('/api/vehicles');
+    const after = await agent2.get('/api/vehicles');
     expect(after.body).toHaveLength(1);
     expect(after.body[0].id).toBe(keep.id);
     expect(after.body[0].name).toBe('KEEP ME');
@@ -312,7 +320,7 @@ describe('POST /api/restore rejections leave target data untouched', () => {
 
 describe('GET /api/backups', () => {
   it('returns [] when there is no backups directory', async () => {
-    const res = await request(app).get('/api/backups');
+    const res = await agent.get('/api/backups');
     expect(res.status).toBe(200);
     expect(res.body).toEqual([]);
   });
@@ -324,7 +332,7 @@ describe('GET /api/backups', () => {
     const filename = 'carmaint-backup-20240101-000000.zip';
     fs.writeFileSync(path.join(backupsDir, filename), bytes);
 
-    const res = await request(app).get('/api/backups');
+    const res = await agent.get('/api/backups');
     expect(res.status).toBe(200);
     expect(res.body).toHaveLength(1);
     expect(res.body[0].filename).toBe(filename);
@@ -339,14 +347,14 @@ describe('GET /api/backups', () => {
     const filename = 'carmaint-backup-20240102-000000.zip';
     fs.writeFileSync(path.join(backupsDir, filename), bytes);
 
-    const res = await downloadBuffer(request(app).get(`/api/backups/${filename}`));
+    const res = await downloadBuffer(agent.get(`/api/backups/${filename}`));
     expect(res.status).toBe(200);
     expect(Buffer.compare(res.body, bytes)).toBe(0);
   });
 
   it('returns 404 for an unknown backup filename', async () => {
     fs.mkdirSync(path.join(dataDir, 'backups'), { recursive: true });
-    const res = await request(app).get('/api/backups/nope.zip');
+    const res = await agent.get('/api/backups/nope.zip');
     expect(res.status).toBe(404);
     expect(typeof res.body.error).toBe('string');
   });
@@ -356,7 +364,7 @@ describe('GET /api/backups', () => {
     fs.mkdirSync(backupsDir, { recursive: true });
     fs.writeFileSync(path.join(backupsDir, 'real.zip'), Buffer.from('x'));
     // URL-encoded "../carmaint.db" must not escape the backups directory.
-    const res = await request(app).get('/api/backups/..%2Fcarmaint.db');
+    const res = await agent.get('/api/backups/..%2Fcarmaint.db');
     expect(res.status).toBe(404);
   });
 });
@@ -365,12 +373,12 @@ describe('GET /api/export.csv (all vehicles)', () => {
   const HEADER = 'vehicle,date,type,mileage,cost,shop,description,notes';
 
   it('exports every vehicle, header, name/fallback vehicle column, date ASC across vehicles', async () => {
-    const v1 = await makeVehicle(app, { name: 'Truck', make: 'Ford', model: 'F-150', year: 2021 });
-    const v2 = await makeVehicle(app, { make: 'Mazda', model: '3', year: 2017 }); // no name -> fallback
-    await addRecord(app, v1.id, { type: 'oil_change', date: '2024-02-01', cost: 30 });
-    await addRecord(app, v2.id, { type: 'repair', date: '2024-01-01', cost: 10 });
+    const v1 = await makeVehicle(agent, { name: 'Truck', make: 'Ford', model: 'F-150', year: 2021 });
+    const v2 = await makeVehicle(agent, { make: 'Mazda', model: '3', year: 2017 }); // no name -> fallback
+    await addRecord(agent, v1.id, { type: 'oil_change', date: '2024-02-01', cost: 30 });
+    await addRecord(agent, v2.id, { type: 'repair', date: '2024-01-01', cost: 10 });
 
-    const res = await request(app).get('/api/export.csv');
+    const res = await agent.get('/api/export.csv');
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toMatch(/text\/csv/);
     expect(res.headers['content-disposition']).toMatch(/attachment/);
@@ -393,13 +401,13 @@ describe('GET /api/export.csv (all vehicles)', () => {
 
 describe('GET /api/export.json', () => {
   it('returns the app/version/exported_at envelope with nested vehicle data', async () => {
-    const v = await makeVehicle(app, { name: 'JSON Rig' });
-    await addRecord(app, v.id, { type: 'oil_change', date: '2024-05-01', cost: 40 });
-    await addRecord(app, v.id, { type: 'repair', date: '2024-02-01', cost: 100 });
-    await addReminder(app, v.id, { interval_months: 6 });
-    const photo = (await uploadPhoto(app, v.id)).body[0];
+    const v = await makeVehicle(agent, { name: 'JSON Rig' });
+    await addRecord(agent, v.id, { type: 'oil_change', date: '2024-05-01', cost: 40 });
+    await addRecord(agent, v.id, { type: 'repair', date: '2024-02-01', cost: 100 });
+    await addReminder(agent, v.id, { interval_months: 6 });
+    const photo = (await uploadPhoto(agent, v.id)).body[0];
 
-    const res = await request(app).get('/api/export.json');
+    const res = await agent.get('/api/export.json');
     expect(res.status).toBe(200);
     expect(res.headers['content-disposition']).toMatch(/attachment/);
     expect(res.body.app).toBe('carmaint');

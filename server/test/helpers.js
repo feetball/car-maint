@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import path from 'node:path';
 import request from 'supertest';
 import { createApp } from '../src/app.js';
@@ -18,6 +19,24 @@ export function makeApp(dataDir, options = {}) {
     });
   }
   return createApp(base);
+}
+
+// Registers a fresh user and returns a supertest agent that carries the resulting
+// session cookie. Auth is always required now, so every test that hits a guarded
+// route needs one of these. The agent is a drop-in for `request(app)` in the data
+// helpers below (makeVehicle/addRecord/…), which take it as their first argument.
+// `agent.username`/`agent.password` are attached for tests that re-login.
+export async function authAgent(app, creds = {}) {
+  const agent = request.agent(app);
+  const username = creds.username ?? `u${crypto.randomUUID().slice(0, 12).replace(/-/g, '')}`;
+  const password = creds.password ?? 'password12345';
+  const res = await agent.post('/api/register').send({ username, password });
+  if (res.status !== 201) {
+    throw new Error(`authAgent register failed: ${res.status} ${res.text}`);
+  }
+  agent.username = username;
+  agent.password = password;
+  return agent;
 }
 
 // Minimal valid 1x1 transparent PNG (67 bytes).
@@ -51,8 +70,10 @@ export function addDays(iso, days) {
   return fmt(new Date(Date.UTC(y, m - 1, d + days)));
 }
 
-export async function makeVehicle(app, overrides = {}) {
-  const res = await request(app)
+// The data helpers take an authenticated `agent` (from authAgent) as their first
+// argument — the created rows belong to that agent's user.
+export async function makeVehicle(agent, overrides = {}) {
+  const res = await agent
     .post('/api/vehicles')
     .send({ make: 'Toyota', model: 'Corolla', year: 2020, ...overrides });
   if (res.status !== 201) {
@@ -61,8 +82,8 @@ export async function makeVehicle(app, overrides = {}) {
   return res.body;
 }
 
-export async function addRecord(app, vehicleId, overrides = {}) {
-  const res = await request(app)
+export async function addRecord(agent, vehicleId, overrides = {}) {
+  const res = await agent
     .post(`/api/vehicles/${vehicleId}/records`)
     .send({ type: 'oil_change', date: today(), ...overrides });
   if (res.status !== 201) {
@@ -72,8 +93,8 @@ export async function addRecord(app, vehicleId, overrides = {}) {
 }
 
 // No default intervals: callers pass interval_months and/or interval_miles explicitly.
-export async function addReminder(app, vehicleId, body = {}) {
-  const res = await request(app)
+export async function addReminder(agent, vehicleId, body = {}) {
+  const res = await agent
     .post(`/api/vehicles/${vehicleId}/reminders`)
     .send({ type: 'oil_change', ...body });
   if (res.status !== 201) {
@@ -82,8 +103,8 @@ export async function addReminder(app, vehicleId, body = {}) {
   return res.body;
 }
 
-export function uploadPhoto(app, vehicleId, { buf = PNG_1x1, filename = 'a.png', contentType = 'image/png' } = {}) {
-  return request(app)
+export function uploadPhoto(agent, vehicleId, { buf = PNG_1x1, filename = 'a.png', contentType = 'image/png' } = {}) {
+  return agent
     .post(`/api/vehicles/${vehicleId}/photos`)
     .attach('photos', buf, { filename, contentType });
 }

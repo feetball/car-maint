@@ -4,7 +4,7 @@ import express from 'express';
 import { createDataFacade } from './data/facade.js';
 import { createPhotoStore } from './photostore/index.js';
 import { createAuth } from './auth.js';
-import { HttpError } from './helpers.js';
+import { HttpError, asyncHandler, notFound } from './helpers.js';
 import { authRouter } from './routes/auth.js';
 import { vehiclesRouter } from './routes/vehicles.js';
 import { photosRouter } from './routes/photos.js';
@@ -48,10 +48,14 @@ export function createApp(options = {}) {
 
   const store = createPhotoStore({ dataDir, blobToken });
 
+  // Production is detected from the deploy env (Vercel sets VERCEL=1; a generic
+  // NODE_ENV=production also counts). It flips the cron/backup gate to fail-closed
+  // when CRON_SECRET is unset (see auth.cronAuthorized).
+  const production = process.env.VERCEL === '1' || process.env.NODE_ENV === 'production';
   const auth = createAuth({
-    appPassword: process.env.APP_PASSWORD,
-    authSecret: process.env.AUTH_SECRET,
     cronSecret: process.env.CRON_SECRET,
+    db,
+    production,
   });
 
   // Shared context handed to every router. Feature config (NHTSA bases, notify
@@ -77,13 +81,32 @@ export function createApp(options = {}) {
 
   app.use(express.json({ limit: '1mb' }));
 
-  // Auth gate over /api and /photos (no-op when APP_PASSWORD is unset). Runs
-  // before the static photo mount and every router so nothing leaks past it.
+  // Auth gate over /api and /photos. Runs before the static photo mount and every
+  // router so nothing leaks past it; attaches req.user on guarded paths.
   app.use(auth.middleware());
 
-  // Photo files (disk mode). In blob mode photo URLs are absolute and this mount
-  // simply serves nothing.
-  app.use('/photos', express.static(photosDir));
+  // Photo files (disk mode). Gated per-owner: the request is already authenticated
+  // (req.user set by the gate above), and here we 404 unless the requested file
+  // belongs to a vehicle owned by req.user — so a leaked UUID filename can't be
+  // read across accounts. In blob mode photo URLs are absolute to the blob store,
+  // so this mount serves nothing and the ownership check is a harmless no-op.
+  app.use(
+    '/photos',
+    asyncHandler(async (req, res, next) => {
+      const filename = path.basename(req.path);
+      if (!filename || filename === '/' || filename === '.') return next();
+      const row = await db.get(
+        `SELECT v.user_id AS owner FROM photos p JOIN vehicles v ON v.id = p.vehicle_id
+          WHERE p.filename = ?`,
+        [filename]
+      );
+      if (!row || row.owner == null || row.owner !== req.user?.id) {
+        throw notFound('Photo not found');
+      }
+      next();
+    }),
+    express.static(photosDir)
+  );
 
   // Auth endpoints (login/logout/status/calendar-url) — always mounted.
   app.use('/api', authRouter(ctx));

@@ -54,7 +54,9 @@ export function vehiclesRouter(ctx) {
           (SELECT COALESCE(SUM(COALESCE(r.cost, 0)), 0) FROM records r WHERE r.vehicle_id = v.id) AS total_cost,
           (SELECT MAX(r.date) FROM records r WHERE r.vehicle_id = v.id) AS last_service_date
         FROM vehicles v
-        ORDER BY v.created_at DESC, v.id DESC`
+        WHERE v.user_id = ?
+        ORDER BY v.created_at DESC, v.id DESC`,
+        [req.user.id]
       );
       const todayStr = today();
       const out = [];
@@ -75,9 +77,10 @@ export function vehiclesRouter(ctx) {
       const db = ctx.db;
       const data = validateVehicle(req.body ?? {}, false);
       const info = await db.run(
-        `INSERT INTO vehicles (name, make, model, year, vin, license_plate, color, current_mileage, notes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO vehicles (user_id, name, make, model, year, vin, license_plate, color, current_mileage, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
+          req.user.id,
           data.name ?? null,
           data.make,
           data.model,
@@ -99,7 +102,7 @@ export function vehiclesRouter(ctx) {
     '/vehicles/:id',
     asyncHandler(async (req, res) => {
       const db = ctx.db;
-      const vehicle = await getVehicleOr404(db, req.params.id);
+      const vehicle = await getVehicleOr404(db, req.params.id, req.user.id);
       const photos = await db.all(
         'SELECT * FROM photos WHERE vehicle_id = ? ORDER BY is_primary DESC, uploaded_at ASC, id ASC',
         [vehicle.id]
@@ -112,7 +115,7 @@ export function vehiclesRouter(ctx) {
     '/vehicles/:id',
     asyncHandler(async (req, res) => {
       const db = ctx.db;
-      const vehicle = await getVehicleOr404(db, req.params.id);
+      const vehicle = await getVehicleOr404(db, req.params.id, req.user.id);
       const data = validateVehicle(req.body ?? {}, true);
       const keys = Object.keys(data);
       if (keys.length > 0) {
@@ -130,7 +133,7 @@ export function vehiclesRouter(ctx) {
     '/vehicles/:id',
     asyncHandler(async (req, res) => {
       const db = ctx.db;
-      const vehicle = await getVehicleOr404(db, req.params.id);
+      const vehicle = await getVehicleOr404(db, req.params.id, req.user.id);
       const photos = await db.all('SELECT filename FROM photos WHERE vehicle_id = ?', [vehicle.id]);
       // Delete children then the parent explicitly (not via FK cascade) so the
       // behavior is identical under both drivers regardless of FK enforcement.

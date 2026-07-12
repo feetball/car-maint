@@ -18,10 +18,25 @@ export function isNonEmptyString(value) {
   return typeof value === 'string' && value.trim() !== '';
 }
 
-export async function getVehicleOr404(db, id) {
-  const vehicle = await db.get('SELECT * FROM vehicles WHERE id = ?', [id]);
+// Loads a vehicle owned by userId, or throws 404. Scoping the lookup by user_id
+// means another user's vehicle — and any NULL-owned (unadopted legacy) vehicle —
+// is indistinguishable from a nonexistent one (404, not 403: no existence leak).
+export async function getVehicleOr404(db, id, userId) {
+  const vehicle = await db.get('SELECT * FROM vehicles WHERE id = ? AND user_id = ?', [id, userId]);
   if (!vehicle) throw notFound('Vehicle not found');
   return vehicle;
+}
+
+// Loads a child row (record/reminder/photo) by id only when its parent vehicle is
+// owned by userId, or throws 404. `table` is a trusted constant, never user input.
+export async function getOwnedChildOr404(db, table, id, userId, label) {
+  const row = await db.get(
+    `SELECT c.* FROM ${table} c JOIN vehicles v ON v.id = c.vehicle_id
+      WHERE c.id = ? AND v.user_id = ?`,
+    [id, userId]
+  );
+  if (!row) throw notFound(label);
+  return row;
 }
 
 // Attaches the store-resolved `url` to a photo row for API responses.

@@ -41,7 +41,10 @@ async function request(path, options = {}) {
 export const api = {
   // Auth
   authStatus: () => request('/api/auth/status'),
-  login: (password) => request('/api/login', { method: 'POST', body: { password }, suppressAuthGate: true }),
+  register: (username, password) =>
+    request('/api/register', { method: 'POST', body: { username, password }, suppressAuthGate: true }),
+  login: (username, password) =>
+    request('/api/login', { method: 'POST', body: { username, password }, suppressAuthGate: true }),
   logout: () => request('/api/logout', { method: 'POST' }),
 
   // Dashboard & shared

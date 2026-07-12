@@ -40,14 +40,14 @@ export function backupRouter(ctx) {
     },
   });
 
-  // Stream a fresh consistent backup zip.
+  // Stream a fresh consistent backup zip of the requesting user's OWN data only.
   router.get('/backup', async (req, res, next) => {
     const tmpDir = path.join(ctx.dataDir, '.backup-tmp');
     let tmpZip;
     try {
       fs.mkdirSync(tmpDir, { recursive: true });
       tmpZip = path.join(tmpDir, `${crypto.randomUUID()}.zip`);
-      await createBackupZip(ctx, tmpZip);
+      await createBackupZip(ctx, tmpZip, req.user.id);
       const size = fs.statSync(tmpZip).size;
       res.setHeader('Content-Type', 'application/zip');
       res.setHeader('Content-Disposition', `attachment; filename="carmaint-backup-${isoDate()}.zip"`);
@@ -78,10 +78,12 @@ export function backupRouter(ctx) {
     }
   });
 
-  // Validate a backup zip fully, then import it at the data level (v3): open the
-  // extracted db read-only, write new photo files to the store, and inside ONE
-  // transaction wipe children-first and re-insert every row preserving ids. Any
-  // failure before/inside the tx leaves live data fully intact.
+  // Validate a backup zip fully, then import it into the REQUESTING USER's account:
+  // open the extracted db read-only, write new photo files to the store, and inside
+  // ONE transaction INSERT the archive's vehicle tree with fresh ids owned by
+  // req.user (any user data in the archive is ignored/stripped). This is ADDITIVE —
+  // it never wipes existing data, so it can't touch other users. Any failure
+  // before/inside the tx leaves live data fully intact.
   router.post('/restore', uploadRestore.single('backup'), async (req, res, next) => {
     const file = req.file;
     const staging = path.join(ctx.dataDir, `.restore-${crypto.randomUUID()}`);
@@ -132,10 +134,8 @@ export function backupRouter(ctx) {
 
       // --- Everything validated; live data has not been touched yet. ---
 
-      // Write all new photo files to the store first (UUID names can't collide
-      // with live files), tracking which old files become orphaned.
-      const oldFiles = await ctx.store.list();
-      const newFilenames = new Set(photos.map((p) => p.filename));
+      // Write the archive's photo files to the store (UUID names). put() overwrites
+      // idempotently if the same file already exists (e.g. re-importing own backup).
       for (const p of photos) {
         const src = path.join(staging, 'photos', p.filename);
         if (fs.existsSync(src)) {
@@ -143,55 +143,59 @@ export function backupRouter(ctx) {
         }
       }
 
-      // One transaction: wipe children-first, re-insert preserving ids.
+      // One transaction: INSERT the tree with fresh ids owned by req.user, remapping
+      // each child's vehicle_id from the archive id to the newly-assigned id. Archive
+      // ids and any user_id are ignored. Existing data is left in place (additive).
+      const me = req.user.id;
+      const byVehicle = new Map(); // archive vehicle id -> its records/reminders/photos
+      for (const v of vehicles) byVehicle.set(v.id, { records: [], reminders: [], photos: [] });
+      for (const r of records) byVehicle.get(r.vehicle_id)?.records.push(r);
+      for (const rm of reminders) byVehicle.get(rm.vehicle_id)?.reminders.push(rm);
+      for (const p of photos) byVehicle.get(p.vehicle_id)?.photos.push(p);
+
       await ctx.db.tx(async (t) => {
-        await t.run('DELETE FROM photos');
-        await t.run('DELETE FROM records');
-        await t.run('DELETE FROM reminders');
-        await t.run('DELETE FROM vehicles');
         for (const v of vehicles) {
-          await t.run(
+          const info = await t.run(
             `INSERT INTO vehicles
-               (id, name, make, model, year, vin, license_plate, color, current_mileage, notes, created_at)
+               (user_id, name, make, model, year, vin, license_plate, color, current_mileage, notes, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
-              v.id, v.name, v.make, v.model, v.year, v.vin, v.license_plate, v.color,
+              me, v.name, v.make, v.model, v.year, v.vin, v.license_plate, v.color,
               v.current_mileage, v.notes, v.created_at,
             ]
           );
-        }
-        for (const r of records) {
-          await t.run(
-            `INSERT INTO records
-               (id, vehicle_id, type, description, date, mileage, cost, shop, notes, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [r.id, r.vehicle_id, r.type, r.description, r.date, r.mileage, r.cost, r.shop, r.notes, r.created_at]
-          );
-        }
-        for (const rm of reminders) {
-          await t.run(
-            `INSERT INTO reminders
-               (id, vehicle_id, type, description, interval_months, interval_miles, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`,
-            [rm.id, rm.vehicle_id, rm.type, rm.description, rm.interval_months, rm.interval_miles, rm.created_at]
-          );
-        }
-        for (const p of photos) {
-          await t.run(
-            `INSERT INTO photos
-               (id, vehicle_id, filename, original_name, is_primary, uploaded_at)
-             VALUES (?, ?, ?, ?, ?, ?)`,
-            [p.id, p.vehicle_id, p.filename, p.original_name, p.is_primary, p.uploaded_at]
-          );
+          const newId = info.lastInsertRowid;
+          const children = byVehicle.get(v.id);
+          for (const r of children.records) {
+            await t.run(
+              `INSERT INTO records
+                 (vehicle_id, type, description, date, mileage, cost, shop, notes, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              [newId, r.type, r.description, r.date, r.mileage, r.cost, r.shop, r.notes, r.created_at]
+            );
+          }
+          for (const rm of children.reminders) {
+            await t.run(
+              `INSERT INTO reminders
+                 (vehicle_id, type, description, interval_months, interval_miles, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)`,
+              [newId, rm.type, rm.description, rm.interval_months, rm.interval_miles, rm.created_at]
+            );
+          }
+          for (const p of children.photos) {
+            await t.run(
+              `INSERT INTO photos
+                 (vehicle_id, filename, original_name, is_primary, uploaded_at)
+               VALUES (?, ?, ?, ?, ?)`,
+              [newId, p.filename, p.original_name, p.is_primary, p.uploaded_at]
+            );
+          }
         }
       });
 
-      // Best-effort: remove old photo files no longer referenced by the import.
-      for (const f of oldFiles) {
-        if (!newFilenames.has(f)) await ctx.store.delete(f);
-      }
-
-      res.status(200).json({ restored: true, counts: await backupCounts(ctx.db) });
+      res
+        .status(200)
+        .json({ restored: true, counts: await backupCounts(ctx.db, me) });
     } catch (err) {
       next(err);
     } finally {
@@ -210,9 +214,24 @@ export function backupRouter(ctx) {
     }
   });
 
+  // The stored backups (created by the cron/timer auto-backup) are GLOBAL whole-DB
+  // snapshots — they contain every user's data, so they are NOT per-user scoped.
+  // They require BOTH a valid logged-in session (req.user, set by the auth gate —
+  // these routes are NOT cron paths, so unlike /api/cron/* they are never
+  // machine-only) AND the CRON_SECRET bearer (admin/DR). The bearer is open when
+  // CRON_SECRET is unset in dev/self-host, but fail-closed in production
+  // (cronAuthorized), so a mere registered user can't read every account's data.
+  function requireAdmin(req, res, next) {
+    if (!req.user || !ctx.auth.cronAuthorized(req)) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+    next();
+  }
+
   // List stored backups, newest first.
   router.get(
     '/backups',
+    requireAdmin,
     asyncHandler(async (req, res) => {
       res.json(await listBackups(ctx));
     })
@@ -221,6 +240,7 @@ export function backupRouter(ctx) {
   // Download a single stored backup (basename-sanitized).
   router.get(
     '/backups/:filename',
+    requireAdmin,
     asyncHandler(async (req, res) => {
       const base = path.basename(req.params.filename);
 
