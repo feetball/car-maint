@@ -58,6 +58,7 @@ function UsersTab() {
   const [busyId, setBusyId] = useState(null);
   const [pendingDelete, setPendingDelete] = useState(null);
   const [pendingRole, setPendingRole] = useState(null);
+  const [pendingMfaReset, setPendingMfaReset] = useState(null);
 
   const load = useCallback(async () => {
     setError(null);
@@ -117,6 +118,23 @@ function UsersTab() {
     }
   }
 
+  async function handleResetMfa() {
+    const user = pendingMfaReset;
+    if (!user) return;
+    setBusyId(user.id);
+    clearError(user.id);
+    try {
+      await api.adminResetMfa(user.id);
+      setPendingMfaReset(null);
+      await load();
+    } catch (err) {
+      setPendingMfaReset(null);
+      noteError(user.id, err.message);
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   if (error) return <ErrorBanner message={error} onRetry={load} />;
   if (!users) return <Loading label="Loading users…" />;
 
@@ -162,6 +180,14 @@ function UsersTab() {
                   </button>
                   <button
                     type="button"
+                    className="button button--ghost button--small"
+                    disabled={busyId === user.id}
+                    onClick={() => setPendingMfaReset(user)}
+                  >
+                    <Icon name="refresh" size={15} /> Reset MFA
+                  </button>
+                  <button
+                    type="button"
                     className="button button--danger-ghost button--small"
                     disabled={busyId === user.id}
                     onClick={() => setPendingDelete(user)}
@@ -192,6 +218,17 @@ function UsersTab() {
           busy={busyId === pendingRole.id}
           onConfirm={handleToggleRole}
           onCancel={() => setPendingRole(null)}
+        />
+      )}
+
+      {pendingMfaReset && (
+        <ConfirmDialog
+          title="Reset two-factor authentication"
+          message={`Clear all of "${pendingMfaReset.username}"'s 2FA (authenticator, passkeys, email, and backup codes) and log them out? They'll be required to set up two-factor again on their next login.`}
+          confirmLabel="Reset MFA"
+          busy={busyId === pendingMfaReset.id}
+          onConfirm={handleResetMfa}
+          onCancel={() => setPendingMfaReset(null)}
         />
       )}
 

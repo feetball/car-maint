@@ -33,7 +33,24 @@ import { createDb, MIGRATIONS, POST_MIGRATIONS, SCHEMA_SQL, SCHEMA_STATEMENTS } 
 // parent-before-child; foreign keys are not enforced on the fresh snapshot db so
 // order only needs to be stable. `users` is included so a global (cron) snapshot
 // captures accounts (the sqlite driver's native db.backup() already copies them).
-const SNAPSHOT_TABLES = ['users', 'vehicles', 'photos', 'records', 'reminders', 'recalls_cache'];
+// `users` and the durable MFA enrollment tables (mfa_totp/backup_codes/email plus
+// webauthn_credentials) are
+// included so a global (cron/DR) snapshot captures accounts AND their second factors —
+// otherwise a whole-DB restore would silently strip everyone's MFA. The ephemeral
+// mfa_challenges (short-lived pending login tokens) is intentionally excluded; stale
+// pending tokens are worthless to restore. Order is parent-before-child.
+const SNAPSHOT_TABLES = [
+  'users',
+  'mfa_totp',
+  'mfa_backup_codes',
+  'mfa_email',
+  'webauthn_credentials',
+  'vehicles',
+  'photos',
+  'records',
+  'reminders',
+  'recalls_cache',
+];
 
 // Callers pass bind params as an array (or omit them). Normalize to an array and
 // coerce `undefined` (which better-sqlite3 rejects and libsql disallows) to null.

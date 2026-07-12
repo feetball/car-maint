@@ -7,10 +7,11 @@ import { asyncHandler, badRequest, notFound, HttpError } from '../helpers.js';
 // router even runs). Admin powers are cross-account and live ONLY here; is_admin does
 // NOT widen any per-user route (/api/vehicles etc. still scope by req.user.id).
 //
-// Cross-driver note: user deletion removes the account's whole vehicle tree with
-// EXPLICIT deletes inside one transaction rather than relying on FK ON DELETE CASCADE,
-// because the two drivers differ on FK enforcement (better-sqlite3 sets
-// foreign_keys=ON; the libsql facade does not) — mirroring routes/vehicles.js.
+// Cross-driver note: user deletion removes the account's whole vehicle tree AND all of
+// its MFA rows (TOTP/backup codes/email/passkeys/challenges) with EXPLICIT deletes
+// inside one transaction rather than relying on FK ON DELETE CASCADE, because the two
+// drivers differ on FK enforcement (better-sqlite3 sets foreign_keys=ON; the libsql
+// facade does not) — mirroring routes/vehicles.js and the mfa-reset handler.
 export function adminRouter(ctx) {
   const router = Router();
   const db = ctx.db;
@@ -92,7 +93,8 @@ export function adminRouter(ctx) {
   );
 
   // DELETE /api/admin/users/:id → delete the account, its whole vehicle tree, sessions,
-  // and photo files. Refuses to remove the last remaining admin (409). Deleting your
+  // ALL MFA rows (TOTP/backup codes/email/passkeys/challenges), and photo files. Refuses
+  // to remove the last remaining admin (409). Deleting your
   // OWN account is allowed (unless you are that last admin); your sessions are dropped
   // by this same delete, so your cookie is invalidated immediately afterward.
   router.delete(
@@ -122,6 +124,17 @@ export function adminRouter(ctx) {
         await t.run('DELETE FROM vehicles WHERE user_id = ?', [id]);
         await t.run('DELETE FROM sessions WHERE user_id = ?', [id]);
 
+        // MFA rows. Production Turso/libsql does NOT enforce ON DELETE CASCADE, so these
+        // must be deleted EXPLICITLY (mirroring the admin mfa-reset handler below) or they
+        // orphan — leaving cleartext TOTP secrets and passkey public keys behind, and
+        // pinning the deleted user's globally-UNIQUE webauthn credential_id so it could
+        // never be re-registered. Child-first, inside this same transaction.
+        await t.run('DELETE FROM mfa_backup_codes WHERE user_id = ?', [id]);
+        await t.run('DELETE FROM mfa_totp WHERE user_id = ?', [id]);
+        await t.run('DELETE FROM mfa_email WHERE user_id = ?', [id]);
+        await t.run('DELETE FROM webauthn_credentials WHERE user_id = ?', [id]);
+        await t.run('DELETE FROM mfa_challenges WHERE user_id = ?', [id]);
+
         // Atomic last-admin guard: delete the user unless they are the sole admin.
         const del = await t.run(
           'DELETE FROM users WHERE id = ? AND NOT (is_admin = 1 AND (SELECT COUNT(*) FROM users WHERE is_admin = 1) <= 1)',
@@ -142,6 +155,30 @@ export function adminRouter(ctx) {
       }
 
       res.json({ deleted: true, id });
+    })
+  );
+
+  // DELETE /api/admin/users/:id/mfa → lockout recovery: clear ALL of a user's MFA
+  // (TOTP, backup codes, email, passkeys, any pending challenges) and drop their sessions, so
+  // the account falls back to the setup-required state and must re-enroll on next
+  // login. This is the escape hatch when a user loses their authenticator.
+  router.delete(
+    '/admin/users/:id/mfa',
+    asyncHandler(async (req, res) => {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id)) throw badRequest('invalid user id');
+      const user = await loadUser(id);
+      if (!user) throw notFound('User not found');
+      await db.tx(async (t) => {
+        await t.run('DELETE FROM mfa_backup_codes WHERE user_id = ?', [id]);
+        await t.run('DELETE FROM mfa_totp WHERE user_id = ?', [id]);
+        await t.run('DELETE FROM mfa_email WHERE user_id = ?', [id]);
+        await t.run('DELETE FROM webauthn_credentials WHERE user_id = ?', [id]);
+        await t.run('DELETE FROM mfa_challenges WHERE user_id = ?', [id]);
+        // Invalidate live sessions so the reset takes effect immediately.
+        await t.run('DELETE FROM sessions WHERE user_id = ?', [id]);
+      });
+      res.json({ reset: true, id, mfa_setup_required: true });
     })
   );
 

@@ -3,7 +3,7 @@ import request from 'supertest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { makeApp, authAgent, adminAndUserAgents, makeVehicle, addRecord, uploadPhoto } from './helpers.js';
+import { makeApp, authAgent, adminAndUserAgents, makeVehicle, addRecord, uploadPhoto, loginWithTotp } from './helpers.js';
 
 // Global whole-DB backup endpoints under /api/backups, exposed to ADMIN sessions (in
 // addition to the existing CRON_SECRET bearer path). These are distinct from the
@@ -110,18 +110,17 @@ describe('global restore (admin-gated, whole-DB replace)', () => {
     expect(restore.status).toBe(200);
     expect(restore.body).toMatchObject({ restored: true, scope: 'global' });
 
-    // Sessions were wiped by the restore → admin must re-login.
+    // Sessions were wiped by the restore → admin must re-login. MFA enrollment is
+    // preserved through the whole-DB restore, so the full password+TOTP flow applies.
     expect((await admin.get('/api/vehicles')).status).toBe(401);
-    const admin2 = request.agent(app);
-    await admin2.post('/api/login').send({ username: admin.username, password: admin.password });
+    const admin2 = await loginWithTotp(app, admin.username, admin.password, admin.totpSecret);
 
     // The post-snapshot vehicle is gone; the snapshot's world is back (both users).
     const names = (await admin2.get('/api/vehicles')).body.map((v) => v.name);
     expect(names).toContain('Admin Car');
     expect(names).not.toContain('Post-Snapshot Car');
 
-    const user2 = request.agent(app);
-    await user2.post('/api/login').send({ username: user.username, password: user.password });
+    const user2 = await loginWithTotp(app, user.username, user.password, user.totpSecret);
     expect((await user2.get('/api/vehicles')).body.map((v) => v.name)).toContain('User Car');
   });
 

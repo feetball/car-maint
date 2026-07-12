@@ -3,7 +3,7 @@ import request from 'supertest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { makeApp, authAgent } from './helpers.js';
+import { makeApp, authAgent, totpCode } from './helpers.js';
 import { hashToken } from '../src/auth.js';
 
 // Auth is always required now (multi-user accounts replaced the shared password).
@@ -41,15 +41,25 @@ describe('GET /api/auth/status', () => {
 });
 
 describe('POST /api/register', () => {
-  it('creates a user, returns 201 {username} and sets a session cookie (auto-login)', async () => {
+  it('creates a user, returns 201 setup-required and sets the pending MFA cookie (no session yet)', async () => {
     const res = await request(app).post('/api/register').send({ username: 'bob_2', password: 'password12345' });
     expect(res.status).toBe(201);
-    // First-ever user in a fresh app is the bootstrap admin.
-    expect(res.body).toEqual({ username: 'bob_2', is_admin: true });
+    // MFA is required for everyone: registration yields the limited setup-required
+    // state, NOT a full session. First-ever user is still the bootstrap admin.
+    expect(res.body).toEqual({ username: 'bob_2', is_admin: true, mfa_setup_required: true });
     const setCookie = res.headers['set-cookie'];
     expect(Array.isArray(setCookie)).toBe(true);
-    expect(setCookie.join(';')).toMatch(/carmaint_session=/);
+    // The pending MFA cookie is set; the real session cookie is NOT.
+    expect(setCookie.join(';')).toMatch(/carmaint_mfa=/);
+    expect(setCookie.join(';')).not.toMatch(/carmaint_session=/);
     expect(setCookie.join(';')).toMatch(/HttpOnly/i);
+
+    // The setup state cannot reach the data API.
+    const agent = request.agent(app);
+    await agent.post('/api/register').send({ username: 'bob_2b', password: 'password12345' });
+    const blocked = await agent.get('/api/vehicles');
+    expect(blocked.status).toBe(403);
+    expect(blocked.body).toMatchObject({ mfa_setup_required: true });
   });
 
   it('rejects a too-short username and a too-short password with 400', async () => {
@@ -75,24 +85,32 @@ describe('POST /api/register', () => {
 });
 
 describe('POST /api/login', () => {
-  it('logs in with correct credentials and grants access', async () => {
-    await request(app).post('/api/register').send({ username: 'dave_4', password: 'password12345' });
+  it('with MFA enrolled: correct password returns mfa_required (no session yet), then TOTP grants access', async () => {
+    // authAgent enrolls TOTP; log a fresh agent through the two-step flow.
+    const enrolled = await authAgent(app, { username: 'dave_4', password: 'password12345' });
 
     const agent = request.agent(app);
-    const res = await agent.post('/api/login').send({ username: 'dave_4', password: 'password12345' });
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({ username: 'dave_4' });
+    const step1 = await agent.post('/api/login').send({ username: 'dave_4', password: 'password12345' });
+    expect(step1.status).toBe(200);
+    expect(step1.body.mfa_required).toBe(true);
+    expect(step1.body.methods).toEqual(expect.arrayContaining(['totp', 'backup']));
+    // No full session yet — data API blocked.
+    expect((await agent.get('/api/vehicles')).status).toBe(403);
+
+    const step2 = await agent.post('/api/login/mfa').send({ code: totpCode(enrolled.totpSecret) });
+    expect(step2.status).toBe(200);
+    expect(step2.body).toEqual({ username: 'dave_4', is_admin: true });
 
     const guarded = await agent.get('/api/vehicles');
     expect(guarded.status).toBe(200);
     expect(Array.isArray(guarded.body)).toBe(true);
   });
 
-  it('is case-insensitive on the username', async () => {
-    await request(app).post('/api/register').send({ username: 'Eve_5', password: 'password12345' });
+  it('is case-insensitive on the username at the password step', async () => {
+    await authAgent(app, { username: 'Eve_5', password: 'password12345' });
     const res = await request(app).post('/api/login').send({ username: 'eve_5', password: 'password12345' });
     expect(res.status).toBe(200);
-    expect(res.body.username).toBe('Eve_5');
+    expect(res.body.mfa_required).toBe(true);
   });
 
   it('rejects a wrong password with a generic 401 and no working session', async () => {

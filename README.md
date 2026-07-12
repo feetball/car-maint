@@ -61,6 +61,12 @@ docker compose --profile test run --rm client-test   # frontend component/unit t
 | `PORT` | `3000` | HTTP port |
 | `DATA_DIR` | `/app/data` (in container) | SQLite + photos location |
 | `STATIC_DIR` | `/app/public` (in container) | Built SPA to serve |
+| `SMTP_HOST` | _(unset)_ | SMTP server host. When unset, the **email** second factor is simply unavailable — TOTP is always available, so enrollment is never blocked. |
+| `SMTP_PORT` | `587` | SMTP server port |
+| `SMTP_USER` | _(unset)_ | SMTP username (omit for an unauthenticated relay) |
+| `SMTP_PASS` | _(unset)_ | SMTP password |
+| `SMTP_FROM` | falls back to `SMTP_USER` | From address for MFA emails |
+| `SMTP_SECURE` | `false` | `true` to use implicit TLS (e.g. port 465) |
 
 To change the host port, edit the `ports` mapping in `docker-compose.yml` (e.g. `"8080:3000"`).
 
@@ -89,6 +95,15 @@ Set these environment variables in the Vercel project:
 | `CRON_SECRET` | any random string; guards the daily backup/notification crons, and authorizes cron/DR (machine) access to the global backup endpoints (admins reach those via their session instead) |
 
 Authentication is built in: users register their own username + password (open signup) and each account only ever sees its own vehicles — no `APP_PASSWORD`/`AUTH_SECRET` to set. Auth is always on.
+
+### Multi-factor authentication (required for everyone)
+
+Every account must have at least one second factor. After a correct password, login is a two-step flow — the real session cookie is only issued once the second factor is verified.
+
+- **Authenticator app (TOTP)** — always available (RFC 6238, 6-digit, 30s, SHA-1). Enroll via the setup screen; the server returns an `otpauth://` URI that the client renders as a QR code. **Backup/recovery codes** (10 one-time codes) are shown once at TOTP enrollment for account recovery.
+- **Email codes** — optional, requires SMTP (`SMTP_*` above). When SMTP is not configured, email is simply an unavailable method; TOTP still covers everyone.
+
+Enforcement: a freshly-registered account (or one an admin has reset) has no factor yet, so it enters a limited **setup-required** state that can reach *only* the MFA enrollment endpoints until a factor is confirmed — the data API and photos are blocked. A user cannot remove their last remaining factor (add another first). If a user loses their authenticator, an admin can clear their MFA (`DELETE /api/admin/users/:id/mfa`), dropping them back to setup-required so they re-enroll on next login. All second-factor material is stored hashed (backup/email codes and pending tokens as sha256; the TOTP shared secret is stored to verify and is protected by whatever guards the database). Second factors are carried through the global (DR) backup/restore, so a whole-DB restore does not strip everyone's MFA.
 
 ### Admin
 

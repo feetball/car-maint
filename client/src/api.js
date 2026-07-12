@@ -1,3 +1,5 @@
+import { startRegistration, startAuthentication } from '@simplewebauthn/browser';
+
 // Optional callback invoked on any 401 so the app can flip to the login view.
 // Kept module-level so every request goes through the same gate.
 let unauthorizedHandler = null;
@@ -46,6 +48,75 @@ export const api = {
   login: (username, password) =>
     request('/api/login', { method: 'POST', body: { username, password }, suppressAuthGate: true }),
   logout: () => request('/api/logout', { method: 'POST' }),
+
+  // --- MFA: login second factor -----------------------------------------------
+  // These legitimately return 401 for a wrong/expired code, so they suppress the
+  // global auth gate and the caller handles the error inline. After 5 fails the
+  // server burns the pending token (mfa_pending:false) → the caller bounces to login.
+  loginMfa: (code, method) =>
+    request('/api/login/mfa', {
+      method: 'POST',
+      body: method ? { code, method } : { code },
+      suppressAuthGate: true,
+    }),
+  emailSendCode: () =>
+    request('/api/mfa/email/send-code', { method: 'POST', suppressAuthGate: true }),
+
+  // Passkey (WebAuthn) login: options → browser assertion → verify. @simplewebauthn/
+  // browser handles all base64url/ArrayBuffer conversion for us.
+  webauthnLogin: async () => {
+    const optionsJSON = await request('/api/login/mfa/webauthn/options', {
+      method: 'POST',
+      suppressAuthGate: true,
+    });
+    const response = await startAuthentication({ optionsJSON });
+    return request('/api/login/mfa/webauthn/verify', {
+      method: 'POST',
+      body: { response },
+      suppressAuthGate: true,
+    });
+  },
+
+  // --- MFA: enrollment + management (setup-required state OR full session) -----
+  // All suppress the auth gate: in the pending setup/login states a 401 means the
+  // pending token expired and is surfaced inline (the screen offers "back to login"),
+  // never a premature silent redirect.
+  mfaStatus: () => request('/api/mfa/status', { suppressAuthGate: true }),
+
+  totpSetup: () => request('/api/mfa/totp/setup', { method: 'POST', suppressAuthGate: true }),
+  totpConfirm: (code) =>
+    request('/api/mfa/totp/confirm', { method: 'POST', body: { code }, suppressAuthGate: true }),
+  deleteTotp: () => request('/api/mfa/totp', { method: 'DELETE', suppressAuthGate: true }),
+
+  backupRegenerate: () =>
+    request('/api/mfa/backup/regenerate', { method: 'POST', suppressAuthGate: true }),
+
+  emailSetup: (email) =>
+    request('/api/mfa/email/setup', { method: 'POST', body: { email }, suppressAuthGate: true }),
+  emailConfirm: (code) =>
+    request('/api/mfa/email/confirm', { method: 'POST', body: { code }, suppressAuthGate: true }),
+  deleteEmail: () => request('/api/mfa/email', { method: 'DELETE', suppressAuthGate: true }),
+
+  // Passkey enrollment: options → browser create → verify. Returns { verified,
+  // credential, backup_codes?, ...session }. `name` labels the credential.
+  webauthnRegister: async (name) => {
+    const optionsJSON = await request('/api/mfa/webauthn/register/options', {
+      method: 'POST',
+      suppressAuthGate: true,
+    });
+    const response = await startRegistration({ optionsJSON });
+    return request('/api/mfa/webauthn/register/verify', {
+      method: 'POST',
+      body: name ? { response, name } : { response },
+      suppressAuthGate: true,
+    });
+  },
+  listPasskeys: () => request('/api/mfa/webauthn/credentials', { suppressAuthGate: true }),
+  deletePasskey: (credentialId) =>
+    request(`/api/mfa/webauthn/${encodeURIComponent(credentialId)}`, {
+      method: 'DELETE',
+      suppressAuthGate: true,
+    }),
 
   // Dashboard & shared
   dashboard: () => request('/api/dashboard'),
@@ -103,6 +174,7 @@ export const api = {
   setUserAdmin: (id, isAdmin) =>
     request(`/api/admin/users/${id}/admin`, { method: 'POST', body: { is_admin: isAdmin } }),
   deleteUser: (id) => request(`/api/admin/users/${id}`, { method: 'DELETE' }),
+  adminResetMfa: (id) => request(`/api/admin/users/${id}/mfa`, { method: 'DELETE' }),
 
   adminVehicles: () => request('/api/admin/vehicles'),
   setVehicleOwner: (id, userId) =>

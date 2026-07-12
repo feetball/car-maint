@@ -3,11 +3,14 @@ import { Link, NavLink, Navigate, Route, Routes } from 'react-router-dom';
 import { api, setUnauthorizedHandler } from './api.js';
 import Icon from './components/Icon.jsx';
 import LoginView from './components/LoginView.jsx';
+import EnrollView from './components/EnrollView.jsx';
+import SecondFactorView from './components/SecondFactorView.jsx';
 import { Loading } from './components/ui.jsx';
 import Dashboard from './pages/Dashboard.jsx';
 import Vehicles from './pages/Vehicles.jsx';
 import VehicleDetail from './pages/VehicleDetail.jsx';
 import Backup from './pages/Backup.jsx';
+import Security from './pages/Security.jsx';
 import Admin from './pages/Admin.jsx';
 
 const navClass = ({ isActive }) => `nav-link${isActive ? ' nav-link--active' : ''}`;
@@ -30,15 +33,24 @@ function NotFound() {
 }
 
 export default function App() {
-  // null = still checking; otherwise { authenticated, username?, is_admin? }. Auth is
-  // always required now (multi-user accounts), so there is no "auth disabled" path.
+  // null = still checking. Otherwise a normalized view of GET /api/auth/status:
+  //   { authenticated:true, ... }        → full app
+  //   { mfaPending:true, methods, ... }  → login second-factor screen
+  //   { mfaSetup:true, ... }             → forced enrollment screen
+  //   { authenticated:false }            → login / register gate
+  // Auth is always required now (multi-user accounts), so there is no "auth disabled" path.
   const [authState, setAuthState] = useState(null);
+  // A short notice shown on the login gate (e.g. after a burned MFA challenge).
+  const [loginNotice, setLoginNotice] = useState(null);
 
   const refreshStatus = useCallback(async () => {
     try {
       const status = await api.authStatus();
       setAuthState({
         authenticated: Boolean(status.authenticated),
+        mfaPending: Boolean(status.mfa_pending),
+        mfaSetup: Boolean(status.mfa_setup_required),
+        methods: status.methods || [],
         username: status.username,
         is_admin: Boolean(status.is_admin),
       });
@@ -49,7 +61,9 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    // Any 401 from the api helper flips the whole app back to the login gate.
+    // A 401 from the DATA api helper flips the whole app back to the login gate. MFA
+    // and login endpoints suppress this gate (they legitimately 401 on wrong codes)
+    // and handle those errors inline, so this only fires on a truly expired session.
     setUnauthorizedHandler(() => setAuthState({ authenticated: false }));
     refreshStatus();
     return () => setUnauthorizedHandler(null);
@@ -64,6 +78,22 @@ export default function App() {
     setAuthState({ authenticated: false });
   }
 
+  // Leave a pending (login-second-factor or setup) state: drop the pending token
+  // server-side and return to the login gate.
+  async function handleCancelPending() {
+    try {
+      await api.logout();
+    } catch {
+      /* ignore */
+    }
+    await refreshStatus();
+  }
+
+  function toLoginWithNotice(message) {
+    setLoginNotice(message);
+    refreshStatus();
+  }
+
   if (!authState) {
     return (
       <div className="app-boot">
@@ -73,7 +103,27 @@ export default function App() {
   }
 
   if (!authState.authenticated) {
-    return <LoginView onAuthenticated={refreshStatus} />;
+    if (authState.mfaSetup) {
+      return (
+        <EnrollView
+          username={authState.username}
+          onDone={refreshStatus}
+          onLogout={handleCancelPending}
+        />
+      );
+    }
+    if (authState.mfaPending) {
+      return (
+        <SecondFactorView
+          username={authState.username}
+          methods={authState.methods}
+          onDone={refreshStatus}
+          onExpired={toLoginWithNotice}
+          onLogout={handleCancelPending}
+        />
+      );
+    }
+    return <LoginView onAuthenticated={refreshStatus} notice={loginNotice} />;
   }
 
   return (
@@ -97,6 +147,10 @@ export default function App() {
           <NavLink to="/backup" className={navClass}>
             <Icon name="cloud" size={17} />
             <span>Backup</span>
+          </NavLink>
+          <NavLink to="/security" className={navClass}>
+            <Icon name="check" size={17} />
+            <span>Two-Factor</span>
           </NavLink>
           {authState.is_admin && (
             <NavLink to="/admin" className={navClass}>
@@ -130,6 +184,7 @@ export default function App() {
           <Route path="/vehicles" element={<Vehicles />} />
           <Route path="/vehicles/:id" element={<VehicleDetail />} />
           <Route path="/backup" element={<Backup />} />
+          <Route path="/security" element={<Security />} />
           <Route
             path="/admin"
             element={authState.is_admin ? <Admin /> : <Navigate to="/" replace />}

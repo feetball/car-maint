@@ -3,6 +3,27 @@ import crypto from 'node:crypto';
 const COOKIE_NAME = 'carmaint_session';
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 
+// MFA login state machine. The pending-login/setup token lives in its own
+// short-lived HttpOnly cookie (separate from the real session) so the client can
+// simply POST the second-factor code back without echoing tokens.
+const MFA_COOKIE_NAME = 'carmaint_mfa';
+const MFA_PENDING_TTL_MS = 10 * 60 * 1000; // 10 minutes
+// Attempts allowed against a single pending-login token before it is invalidated
+// (forcing a fresh password login). Caps brute force of the 6-digit codes.
+export const MAX_MFA_ATTEMPTS = 5;
+
+// Login (password step) rate limit. The per-pending-token MAX_MFA_ATTEMPTS cap only
+// bounds guesses against ONE token; without this an attacker who knows the password
+// could loop login→mint-token→5-guesses unbounded, brute-forcing the second factor.
+// Best-effort in-memory FIXED WINDOW keyed by lowercased username + client IP, so
+// distinct accounts (and distinct test users) never throttle each other. Serverless
+// caveat: state is per-instance, so across N running instances the effective cap is
+// ~N× this limit — acceptable as a mitigation (a DB-backed counter would be stronger
+// but heavier). Only the PASSWORD step is limited here; the MFA step keeps its own
+// per-token cap.
+export const LOGIN_RATELIMIT_MAX = 10; // attempts per window per key
+export const LOGIN_RATELIMIT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+
 // scrypt parameters. Kept in the stored hash string (scrypt:N:r:p:salthex:hashhex)
 // so they can be raised later without invalidating existing hashes — verify reads
 // the params from the stored value, not from these constants.
@@ -80,6 +101,13 @@ export function newCalendarToken() {
   return crypto.randomBytes(32).toString('hex');
 }
 
+// Pending-login/setup token: 32 random bytes hex handed to the client in the
+// carmaint_mfa cookie; only its sha256 is stored (mfa_challenges.token_hash), same
+// leaked-DB-can't-be-replayed property as session tokens.
+export function newPendingToken() {
+  return crypto.randomBytes(32).toString('hex');
+}
+
 // Minimal cookie header parse (no cookie-parser dependency).
 export function readCookie(req, name) {
   const header = req.headers?.cookie;
@@ -141,6 +169,93 @@ export function createAuth({ cronSecret, db, production = false } = {}) {
     const token = readCookie(req, COOKIE_NAME);
     if (!token) return;
     await db.run('DELETE FROM sessions WHERE token_hash = ?', [hashToken(token)]);
+  }
+
+  // --- MFA pending-token / cookie helpers ----------------------------------
+  // The carmaint_mfa cookie mirrors the session cookie's attributes but with the
+  // MFA name and a short (10 min) Max-Age.
+  function mfaCookieAttrs(req, value, maxAgeSeconds) {
+    const attrs = [
+      `${MFA_COOKIE_NAME}=${value}`,
+      'HttpOnly',
+      'Path=/',
+      'SameSite=Lax',
+      `Max-Age=${maxAgeSeconds}`,
+    ];
+    const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
+    if (proto === 'https') attrs.push('Secure');
+    return attrs.join('; ');
+  }
+  function setMfaCookie(req, res, token) {
+    res.append('Set-Cookie', mfaCookieAttrs(req, token, Math.floor(MFA_PENDING_TTL_MS / 1000)));
+  }
+  function clearMfaCookie(req, res) {
+    res.append('Set-Cookie', mfaCookieAttrs(req, '', 0));
+  }
+
+  // Creates a pending-login/setup challenge row for a user and returns the raw
+  // token (to put in the carmaint_mfa cookie). kind is 'login' or 'setup'.
+  async function createPending(userId, kind) {
+    const token = newPendingToken();
+    const expiresAt = new Date(Date.now() + MFA_PENDING_TTL_MS).toISOString();
+    await db.run(
+      'INSERT INTO mfa_challenges (token_hash, user_id, kind, expires_at) VALUES (?, ?, ?, ?)',
+      [hashToken(token), userId, kind, expiresAt]
+    );
+    return token;
+  }
+
+  // Resolves the request's carmaint_mfa cookie to the pending row, or null.
+  // Expired rows are opportunistically deleted so the table self-prunes on access.
+  async function resolvePending(req) {
+    const token = readCookie(req, MFA_COOKIE_NAME);
+    if (!token) return null;
+    const tokenHash = hashToken(token);
+    const row = await db.get('SELECT * FROM mfa_challenges WHERE token_hash = ?', [tokenHash]);
+    if (!row) return null;
+    if (row.expires_at <= new Date().toISOString()) {
+      await db.run('DELETE FROM mfa_challenges WHERE token_hash = ?', [tokenHash]);
+      return null;
+    }
+    return { ...row, tokenHash };
+  }
+
+  async function deletePending(tokenHash) {
+    await db.run('DELETE FROM mfa_challenges WHERE token_hash = ?', [tokenHash]);
+  }
+
+  // --- Login (password step) rate limiter ----------------------------------
+  // In-memory fixed-window counter, one map per app instance. key -> { count, resetAt }.
+  const loginAttempts = new Map();
+
+  // Best-effort client IP: first hop of x-forwarded-for (Vercel/proxy) else req.ip.
+  function clientIp(req) {
+    const xff = req.headers['x-forwarded-for'];
+    if (typeof xff === 'string' && xff.length) return xff.split(',')[0].trim();
+    return req.ip || req.socket?.remoteAddress || 'unknown';
+  }
+
+  // Records one login attempt for (username, ip) and reports whether it is within the
+  // per-window cap. Fixed window: the counter resets once the window elapses. Returns
+  // true when the attempt is ALLOWED, false when the cap is exceeded (caller → 429).
+  // Keyed on the lowercased username so it matches the case-insensitive account lookup
+  // and so distinct accounts are isolated; IP is folded in as a second dimension.
+  function registerLoginAttempt(req) {
+    const username =
+      typeof req.body?.username === 'string' ? req.body.username.toLowerCase() : '';
+    const key = `${username} ${clientIp(req)}`;
+    const now = Date.now();
+    const entry = loginAttempts.get(key);
+    if (!entry || entry.resetAt <= now) {
+      loginAttempts.set(key, { count: 1, resetAt: now + LOGIN_RATELIMIT_WINDOW_MS });
+      return true;
+    }
+    entry.count += 1;
+    // Opportunistic prune of expired keys so the map does not grow unbounded.
+    if (loginAttempts.size > 10000) {
+      for (const [k, v] of loginAttempts) if (v.resetAt <= now) loginAttempts.delete(k);
+    }
+    return entry.count <= LOGIN_RATELIMIT_MAX;
   }
 
   // Resolves the request's session cookie to { id, username } or null. Expired
@@ -213,6 +328,38 @@ export function createAuth({ cronSecret, db, production = false } = {}) {
   // of the path (the real req.path / routing is left untouched). Without this,
   // `/API/backups` would dodge the gate entirely and serve unauthenticated.
   const EXEMPT = new Set(['/api/register', '/api/login', '/api/logout', '/api/auth/status']);
+  // Paths reachable while only PASSWORD-authenticated (a pending 'login' or 'setup'
+  // state, no full session): the second-factor submit and every MFA management
+  // endpoint. Everything else under /api (the data API) and /photos stays blocked
+  // until a full session exists. This is the enforcement seam — MFA is required for
+  // everyone, so a pending user can ONLY finish MFA, nothing else.
+  // /api/login/mfa is the second-factor submit; /api/login/mfa/* are the WebAuthn
+  // assertion round-trip (options + verify), which also need the pending-login state.
+  // This is the SETUP-state surface: a setup-pending user (no active factor yet) is
+  // enrolling their FIRST factor, so they legitimately reach every enrollment endpoint.
+  const isMfaPath = (p) =>
+    p === '/api/login/mfa' ||
+    p.startsWith('/api/login/mfa/') ||
+    p === '/api/mfa' ||
+    p.startsWith('/api/mfa/');
+  // The LOGIN-state allowlist. A login-pending user (password verified, but they
+  // ALREADY have a confirmed second factor) must PROVE that factor — never enroll or
+  // mutate one. So they may reach ONLY: the second-factor submit (/api/login/mfa),
+  // the passkey assertion round-trip (/api/login/mfa/webauthn/options|verify), a fresh
+  // email login code to their CONFIRMED address (/api/mfa/email/send-code), and the
+  // read-only status the second-factor screen needs (/api/mfa/status). Every other
+  // /api/mfa/* endpoint (totp/setup+confirm, email/setup+confirm, webauthn/register/*,
+  // backup/regenerate) ENROLLS or MUTATES a factor and is blocked (403) — otherwise an
+  // attacker with only the password could overwrite the victim's factor and mint a full
+  // session. (/api/logout is already exempt above, so it works in every state.)
+  // Paths are compared against the same lowercased copy the gate uses for case safety.
+  const LOGIN_PENDING_ALLOW = new Set([
+    '/api/login/mfa',
+    '/api/login/mfa/webauthn/options',
+    '/api/login/mfa/webauthn/verify',
+    '/api/mfa/email/send-code',
+    '/api/mfa/status',
+  ]);
   // The global whole-DB backup endpoints all live under /api/backups (list, download,
   // on-demand create, global restore). They accept EITHER an admin session OR the
   // CRON_SECRET bearer (cron/DR tooling). A bearer-only machine request has no session,
@@ -230,10 +377,33 @@ export function createAuth({ cronSecret, db, production = false } = {}) {
       if (EXEMPT.has(p)) return next();
       if (p.startsWith('/api/cron/')) return next();
       authenticate(req)
-        .then((user) => {
+        .then(async (user) => {
           if (user) {
+            // Full session → full access (unchanged behavior).
             req.user = user;
             return next();
+          }
+          // No full session. A valid pending token grants a LIMITED state that can
+          // only reach MFA endpoints (enroll / second-factor / status / logout).
+          const pending = await resolvePending(req);
+          if (pending) {
+            req.mfa = { userId: pending.user_id, kind: pending.kind, tokenHash: pending.tokenHash };
+            // Two distinct limited states, two distinct allowlists:
+            //   setup — no active factor yet; enrolling the first one is the whole
+            //           point, so the full MFA enrollment surface is reachable.
+            //   login — already has a factor; may ONLY submit it / read status / request
+            //           an email code. Enrollment + mutation endpoints are BLOCKED so a
+            //           password-only attacker cannot overwrite the victim's factor.
+            const allowed =
+              pending.kind === 'setup' ? isMfaPath(p) : LOGIN_PENDING_ALLOW.has(p);
+            if (allowed) return next();
+            // Data API / photos (and, for login-pending, the enrollment endpoints) are
+            // off-limits until MFA completes. Report the state so the client can route.
+            const body =
+              pending.kind === 'setup'
+                ? { error: 'MFA setup required', mfa_setup_required: true }
+                : { error: 'MFA required', mfa_pending: true };
+            return res.status(403).json(body);
           }
           if (isGlobalBackupPath(p) && bearerPresentAndValid(req)) return next();
           return res.status(401).json({ error: 'Authentication required' });
@@ -254,10 +424,17 @@ export function createAuth({ cronSecret, db, production = false } = {}) {
     setSessionCookie,
     clearSessionCookie,
     authenticate,
+    createPending,
+    resolvePending,
+    deletePending,
+    setMfaCookie,
+    clearMfaCookie,
     cronAuthorized,
     bearerPresentAndValid,
     requireAdminSession,
+    registerLoginAttempt,
     middleware,
     COOKIE_NAME,
+    MFA_COOKIE_NAME,
   };
 }

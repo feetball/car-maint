@@ -12,8 +12,9 @@ const MIN_PASSWORD_LEN = 8;
 // required now (multi-user accounts), so this offers both Login and Register.
 // Submits to POST /api/login or /api/register; server errors ({error}) surface
 // inline, and success asks the parent to reload auth/app state.
-export default function LoginView({ onAuthenticated }) {
+export default function LoginView({ onAuthenticated, notice = null }) {
   const [mode, setMode] = useState('login'); // 'login' | 'register'
+  const [dismissedNotice, setDismissedNotice] = useState(false);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
@@ -57,6 +58,7 @@ export default function LoginView({ onAuthenticated }) {
 
     setBusy(true);
     setError(null);
+    setDismissedNotice(true);
     try {
       if (isRegister) await api.register(username, password);
       else await api.login(username, password);
@@ -83,6 +85,11 @@ export default function LoginView({ onAuthenticated }) {
         {error && (
           <div className="error-banner" role="alert">
             <span className="error-banner__message">{error}</span>
+          </div>
+        )}
+        {notice && !error && !dismissedNotice && (
+          <div className="info-banner" role="status">
+            <span>{notice}</span>
           </div>
         )}
         <label className="field field--full">

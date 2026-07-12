@@ -2,6 +2,11 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import request from 'supertest';
 import { createApp } from '../src/app.js';
+import { totpCode } from '../src/mfa.js';
+
+// Re-export so tests can compute a valid TOTP code from a secret without reaching
+// into src/. Used by authAgent's auto-enroll and the MFA test file.
+export { totpCode };
 
 // Single shared app-construction helper used by every server test file. Keeps the
 // whole suite driver-agnostic: when env DB_DRIVER=libsql it builds the app on the
@@ -21,23 +26,54 @@ export function makeApp(dataDir, options = {}) {
   return createApp(base);
 }
 
-// Registers a fresh user and returns a supertest agent that carries the resulting
-// session cookie. Auth is always required now, so every test that hits a guarded
-// route needs one of these. The agent is a drop-in for `request(app)` in the data
-// helpers below (makeVehicle/addRecord/…), which take it as their first argument.
-// `agent.username`/`agent.password` are attached for tests that re-login.
+// Registers a fresh user and AUTO-ENROLLS TOTP so the agent ends up with a full
+// session — MFA is now required for everyone, so registration alone only yields the
+// limited setup-required state. This helper walks register → totp/setup →
+// totp/confirm (with a computed code), which upgrades to a real session cookie. The
+// agent is then a drop-in for `request(app)` in the data helpers below.
+// `agent.username`/`agent.password`/`agent.is_admin` are attached for re-login tests;
+// `agent.totpSecret` and `agent.backupCodes` are exposed for MFA-specific tests.
 export async function authAgent(app, creds = {}) {
   const agent = request.agent(app);
   const username = creds.username ?? `u${crypto.randomUUID().slice(0, 12).replace(/-/g, '')}`;
   const password = creds.password ?? 'password12345';
-  const res = await agent.post('/api/register').send({ username, password });
-  if (res.status !== 201) {
-    throw new Error(`authAgent register failed: ${res.status} ${res.text}`);
+
+  const reg = await agent.post('/api/register').send({ username, password });
+  if (reg.status !== 201) {
+    throw new Error(`authAgent register failed: ${reg.status} ${reg.text}`);
   }
+  // Register echoes is_admin (first-ever user in a fresh app is the bootstrap admin).
+  agent.is_admin = reg.body?.is_admin === true;
+
+  const setup = await agent.post('/api/mfa/totp/setup').send({});
+  if (setup.status !== 200) {
+    throw new Error(`authAgent totp setup failed: ${setup.status} ${setup.text}`);
+  }
+  const secret = setup.body.secret_base32;
+  const confirm = await agent.post('/api/mfa/totp/confirm').send({ code: totpCode(secret) });
+  if (confirm.status !== 200) {
+    throw new Error(`authAgent totp confirm failed: ${confirm.status} ${confirm.text}`);
+  }
+
   agent.username = username;
   agent.password = password;
-  // Register echoes is_admin (first-ever user in a fresh app is the bootstrap admin).
-  agent.is_admin = res.body?.is_admin === true;
+  agent.totpSecret = secret;
+  agent.backupCodes = confirm.body.backup_codes;
+  return agent;
+}
+
+// Logs an already-registered agent back in through the full MFA flow (password →
+// TOTP challenge), leaving it with a fresh full session. Reuses agent.totpSecret.
+export async function loginWithTotp(app, username, password, secret) {
+  const agent = request.agent(app);
+  const login = await agent.post('/api/login').send({ username, password });
+  if (login.status !== 200 || !login.body.mfa_required) {
+    throw new Error(`loginWithTotp step1 failed: ${login.status} ${login.text}`);
+  }
+  const step2 = await agent.post('/api/login/mfa').send({ code: totpCode(secret) });
+  if (step2.status !== 200) {
+    throw new Error(`loginWithTotp step2 failed: ${step2.status} ${step2.text}`);
+  }
   return agent;
 }
 

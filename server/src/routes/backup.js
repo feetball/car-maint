@@ -296,6 +296,7 @@ export function backupRouter(ctx) {
           throw badRequest('backup carmaint.db could not be opened');
         }
         let users, vehicles, records, reminders, photos, recalls;
+        let mfaTotp, mfaBackup, mfaEmail, webauthnCreds;
         try {
           const tables = new Set(
             staged
@@ -317,6 +318,19 @@ export function backupRouter(ctx) {
           recalls = tables.has('recalls_cache')
             ? staged.prepare('SELECT * FROM recalls_cache').all()
             : [];
+          // Durable MFA enrollment, when present (older snapshots may predate MFA —
+          // tolerate their absence so restoring a pre-MFA backup still works; those
+          // users simply land in the setup-required state on next login).
+          mfaTotp = tables.has('mfa_totp') ? staged.prepare('SELECT * FROM mfa_totp').all() : [];
+          mfaBackup = tables.has('mfa_backup_codes')
+            ? staged.prepare('SELECT * FROM mfa_backup_codes').all()
+            : [];
+          mfaEmail = tables.has('mfa_email') ? staged.prepare('SELECT * FROM mfa_email').all() : [];
+          // WebAuthn passkeys, when present (older snapshots predate them — tolerate
+          // absence so restoring a pre-WebAuthn backup still works).
+          webauthnCreds = tables.has('webauthn_credentials')
+            ? staged.prepare('SELECT * FROM webauthn_credentials').all()
+            : [];
         } finally {
           staged.close();
         }
@@ -336,6 +350,14 @@ export function backupRouter(ctx) {
         // cookies (including the admin's own) are invalidated and everyone re-logs in.
         await ctx.db.tx(async (t) => {
           await t.run('DELETE FROM sessions');
+          // MFA rows are children of users; delete them explicitly (child-before-parent)
+          // so the wipe is identical whether or not the driver enforces FK cascade.
+          // mfa_challenges (ephemeral pending tokens) is cleared but never reloaded.
+          await t.run('DELETE FROM mfa_challenges');
+          await t.run('DELETE FROM mfa_backup_codes');
+          await t.run('DELETE FROM mfa_email');
+          await t.run('DELETE FROM mfa_totp');
+          await t.run('DELETE FROM webauthn_credentials');
           await t.run('DELETE FROM photos');
           await t.run('DELETE FROM records');
           await t.run('DELETE FROM reminders');
@@ -389,6 +411,34 @@ export function backupRouter(ctx) {
             await t.run(
               'INSERT INTO recalls_cache (vehicle_id, fetched_at, payload) VALUES (?, ?, ?)',
               [rc.vehicle_id, rc.fetched_at, rc.payload]
+            );
+          }
+          // MFA enrollment, reloaded with original ids/ownership so second factors
+          // survive a whole-DB restore (users were re-inserted with their original ids).
+          for (const m of mfaTotp) {
+            await t.run(
+              'INSERT INTO mfa_totp (user_id, secret, pending_secret, confirmed_at, created_at) VALUES (?, ?, ?, ?, ?)',
+              [m.user_id, m.secret, m.pending_secret, m.confirmed_at, m.created_at]
+            );
+          }
+          for (const m of mfaBackup) {
+            await t.run(
+              'INSERT INTO mfa_backup_codes (id, user_id, code_hash, used_at, created_at) VALUES (?, ?, ?, ?, ?)',
+              [m.id, m.user_id, m.code_hash, m.used_at, m.created_at]
+            );
+          }
+          for (const m of mfaEmail) {
+            await t.run(
+              'INSERT INTO mfa_email (user_id, email, code_hash, code_expires_at, attempts, confirmed_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+              [m.user_id, m.email, m.code_hash, m.code_expires_at, m.attempts, m.confirmed_at, m.created_at]
+            );
+          }
+          // WebAuthn credentials, reloaded with original ids/ownership so passkeys
+          // survive a whole-DB restore (users were re-inserted with their original ids).
+          for (const c of webauthnCreds) {
+            await t.run(
+              'INSERT INTO webauthn_credentials (id, user_id, credential_id, public_key, counter, transports, name, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+              [c.id, c.user_id, c.credential_id, c.public_key, c.counter, c.transports, c.name, c.created_at, c.last_used_at]
             );
           }
         });

@@ -5,7 +5,9 @@ import { createDataFacade } from './data/facade.js';
 import { createPhotoStore } from './photostore/index.js';
 import { createAuth } from './auth.js';
 import { HttpError, asyncHandler, notFound } from './helpers.js';
+import { createMailer } from './mfa.js';
 import { authRouter } from './routes/auth.js';
+import { mfaRouter } from './routes/mfa.js';
 import { vehiclesRouter } from './routes/vehicles.js';
 import { photosRouter } from './routes/photos.js';
 import { recordsRouter } from './routes/records.js';
@@ -49,6 +51,22 @@ export function createApp(options = {}) {
 
   const store = createPhotoStore({ dataDir, blobToken });
 
+  // Email (SMTP) MFA. The mailer is lazy + injectable: tests pass options.mailer (a
+  // capturing stub so no real email is sent and the code can be read); production
+  // builds a nodemailer transport from SMTP_* on first send. When SMTP_HOST is unset
+  // the mailer reports configured:false and email MFA is simply unavailable — boot
+  // never fails and no email endpoint crashes.
+  const mailer =
+    options.mailer ??
+    createMailer({
+      host: process.env.SMTP_HOST,
+      port: process.env.SMTP_PORT ? Number(process.env.SMTP_PORT) : undefined,
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS,
+      from: process.env.SMTP_FROM,
+      secure: process.env.SMTP_SECURE === 'true',
+    });
+
   // Production is detected from the deploy env (Vercel sets VERCEL=1; a generic
   // NODE_ENV=production also counts). It flips the cron/backup gate to fail-closed
   // when CRON_SECRET is unset (see auth.cronAuthorized).
@@ -68,6 +86,7 @@ export function createApp(options = {}) {
     db,
     store,
     auth,
+    mailer,
     config: {
       nhtsaVpicBase: options.nhtsaVpicBase ?? process.env.NHTSA_VPIC_BASE ?? DEFAULT_NHTSA_VPIC_BASE,
       nhtsaRecallsBase:
@@ -109,8 +128,11 @@ export function createApp(options = {}) {
     express.static(photosDir)
   );
 
-  // Auth endpoints (login/logout/status/calendar-url) — always mounted.
+  // Auth endpoints (register/login/login-mfa/logout/status/calendar-url).
   app.use('/api', authRouter(ctx));
+  // MFA enrollment + management (/api/mfa/*). Mounted after the gate so req.user or
+  // req.mfa is attached; the gate lets these through in the pending state.
+  app.use('/api', mfaRouter(ctx));
 
   // Core v2 API.
   app.use('/api', miscRouter(ctx));

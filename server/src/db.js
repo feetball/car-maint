@@ -78,6 +78,91 @@ export const SCHEMA_STATEMENTS = [
   fetched_at TEXT,
   payload TEXT
 )`,
+  // === MFA (multi-factor auth) ===
+  // These are brand-NEW tables, so CREATE TABLE IF NOT EXISTS is all an existing
+  // production DB needs — no ALTER migration (that is only for adding columns to a
+  // pre-existing table). IF NOT EXISTS is idempotent and concurrency-safe: two
+  // cold-start instances racing the create both converge with no error.
+  //
+  // TOTP shared secret per user. `secret` is the ACTIVE secret (verified against);
+  // `pending_secret` holds an in-progress (re-)enrollment secret until it is
+  // confirmed, so re-enrolling never disables the currently-working authenticator.
+  // confirmed_at NULL until the first successful verify — enrollment isn't active
+  // until confirmed. The secret is sensitive (needed to verify, so stored, not
+  // hashed); at rest it is protected by whatever guards the DB — documented.
+  `CREATE TABLE IF NOT EXISTS mfa_totp (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  secret TEXT,
+  pending_secret TEXT,
+  confirmed_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+)`,
+  // One-time backup/recovery codes. Only the sha256 of the normalized code is
+  // stored (never plaintext); plaintext is shown to the user exactly once at
+  // generation. used_at NULL until consumed; single-use is enforced atomically
+  // (UPDATE ... WHERE used_at IS NULL, changes===1).
+  `CREATE TABLE IF NOT EXISTS mfa_backup_codes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  code_hash TEXT NOT NULL,
+  used_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+)`,
+  // Email second factor. `email` is the delivery address (users table has none).
+  // A pending verification code lives in code_hash (+ code_expires_at); confirmed_at
+  // NULL until the emailed code is verified. Only the code's sha256 is stored.
+  `CREATE TABLE IF NOT EXISTS mfa_email (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  email TEXT NOT NULL,
+  code_hash TEXT,
+  code_expires_at TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  confirmed_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+)`,
+  // Short-lived, hashed, single-purpose pending tokens backing the login state
+  // machine. token_hash = sha256 of the random token carried in the carmaint_mfa
+  // cookie. kind: 'login' (password OK, awaiting second factor) or 'setup' (no MFA
+  // yet, must enroll). code_hash/code_expires_at hold an emailed login code when the
+  // user chose email at the challenge. attempts caps brute force; the row is deleted
+  // on success and opportunistically when expired.
+  `CREATE TABLE IF NOT EXISTS mfa_challenges (
+  token_hash TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  code_hash TEXT,
+  code_expires_at TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+)`,
+  // WebAuthn / passkey credentials — a SECOND-FACTOR method (not passwordless). One
+  // row per registered authenticator. Brand-new table, so CREATE TABLE IF NOT EXISTS
+  // is the whole migration (idempotent + concurrency-safe like the other MFA tables).
+  //   credential_id: the authenticator's credential id, base64url text, globally UNIQUE
+  //     (a credential is bound to exactly the user it registered under — the UNIQUE index
+  //     is what prevents one account re-registering another account's credential id).
+  //   public_key: base64url of the COSE public-key bytes returned at registration; the
+  //     library re-verifies assertions against it (decoded back to bytes on login).
+  //   counter: the authenticator's signature counter; bumped on each assertion. A
+  //     regression (new < stored, when the authenticator uses counters) signals a clone
+  //     and is rejected by the verify library. Many platform authenticators report 0/0.
+  //   transports: JSON array of hints (e.g. ["internal","hybrid"]), nullable.
+  //   name: optional user label for the settings UI.
+  // ON DELETE CASCADE (honored by the FK-enforcing sqlite driver) plus the explicit
+  // child-first deletes in the admin user-delete / mfa-reset / global restore keep it
+  // correct on libsql too (which does not enforce FK cascade).
+  `CREATE TABLE IF NOT EXISTS webauthn_credentials (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  credential_id TEXT NOT NULL UNIQUE,
+  public_key TEXT NOT NULL,
+  counter INTEGER NOT NULL DEFAULT 0,
+  transports TEXT,
+  name TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_used_at TEXT
+)`,
 ];
 
 export const SCHEMA_SQL = SCHEMA_STATEMENTS.join(';\n') + ';';
