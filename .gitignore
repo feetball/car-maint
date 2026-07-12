@@ -1,7 +1,11 @@
 node_modules/
 dist/
 data/
+# The unanchored data/ rule above also matches the source dir server/src/data
+# (the async data-facade module lives there); keep that tracked.
+!server/src/data/
 backups/
+package-lock.json
 *.log
 .DS_Store
 .vercel/
