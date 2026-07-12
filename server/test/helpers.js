@@ -36,7 +36,18 @@ export async function authAgent(app, creds = {}) {
   }
   agent.username = username;
   agent.password = password;
+  // Register echoes is_admin (first-ever user in a fresh app is the bootstrap admin).
+  agent.is_admin = res.body?.is_admin === true;
   return agent;
+}
+
+// Convenience for admin tests: returns { admin, user } where `admin` is the FIRST
+// account registered in the app (the bootstrap admin) and `user` is a second, normal
+// (non-admin) account. Both are authenticated supertest agents.
+export async function adminAndUserAgents(app) {
+  const admin = await authAgent(app);
+  const user = await authAgent(app);
+  return { admin, user };
 }
 
 // Minimal valid 1x1 transparent PNG (67 bytes).

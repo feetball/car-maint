@@ -149,7 +149,7 @@ export function createAuth({ cronSecret, db, production = false } = {}) {
     const token = readCookie(req, COOKIE_NAME);
     if (!token) return null;
     const row = await db.get(
-      `SELECT s.expires_at AS expires_at, u.id AS id, u.username AS username
+      `SELECT s.expires_at AS expires_at, u.id AS id, u.username AS username, u.is_admin AS is_admin
          FROM sessions s JOIN users u ON u.id = s.user_id
         WHERE s.token_hash = ?`,
       [hashToken(token)]
@@ -159,7 +159,9 @@ export function createAuth({ cronSecret, db, production = false } = {}) {
       await db.run('DELETE FROM sessions WHERE token_hash = ?', [hashToken(token)]);
       return null;
     }
-    return { id: row.id, username: row.username };
+    // is_admin is stored as 0/1; expose a real boolean so callers (req.user.is_admin,
+    // the status payload, the admin guard) never branch on a truthy number.
+    return { id: row.id, username: row.username, is_admin: !!row.is_admin };
   }
 
   // Cron/admin routes accept Authorization: Bearer <CRON_SECRET>. When CRON_SECRET
@@ -168,14 +170,36 @@ export function createAuth({ cronSecret, db, production = false } = {}) {
   // anyone — but stay OPEN in non-production (local dev / Docker / the test suite,
   // which run with no CRON_SECRET) so those keep working. When CRON_SECRET is SET
   // the bearer is required in every environment.
-  function cronAuthorized(req) {
-    if (!cronSecret) return !production;
+  // STRICT bearer check: true only when CRON_SECRET is configured AND the request
+  // carries a matching `Authorization: Bearer <secret>` (timing-safe). Unlike
+  // cronAuthorized this has NO dev-open fallback, so it is the right primitive for
+  // deciding real machine/DR access to the global-backup routes: a mere logged-in
+  // (non-admin) user in dev must not be waved through just because CRON_SECRET is
+  // unset. cronAuthorized (below) keeps its dev-open behavior for /api/cron/*.
+  function bearerPresentAndValid(req) {
+    if (!cronSecret) return false;
     const header = req.headers.authorization || '';
     const m = /^Bearer\s+(.+)$/i.exec(header);
     if (!m) return false;
     const a = crypto.createHash('sha256').update(m[1]).digest();
     const b = crypto.createHash('sha256').update(cronSecret).digest();
     return crypto.timingSafeEqual(a, b);
+  }
+
+  function cronAuthorized(req) {
+    if (!cronSecret) return !production;
+    return bearerPresentAndValid(req);
+  }
+
+  // Session-based admin guard for /api/admin/*. The global auth gate already ran and
+  // attached req.user for guarded paths, so a missing req.user means no valid session
+  // (401) and a present-but-non-admin user means forbidden (403). is_admin gives NO
+  // implicit access to per-user routes — it is only consulted here and by the
+  // global-backup guard; per-user routers still scope every query by req.user.id.
+  function requireAdminSession(req, res, next) {
+    if (!req.user) return res.status(401).json({ error: 'Authentication required' });
+    if (!req.user.is_admin) return res.status(403).json({ error: 'Admin access required' });
+    next();
   }
 
   // Express middleware enforcing a valid session over /api and /photos. Exempt:
@@ -189,6 +213,14 @@ export function createAuth({ cronSecret, db, production = false } = {}) {
   // of the path (the real req.path / routing is left untouched). Without this,
   // `/API/backups` would dodge the gate entirely and serve unauthenticated.
   const EXEMPT = new Set(['/api/register', '/api/login', '/api/logout', '/api/auth/status']);
+  // The global whole-DB backup endpoints all live under /api/backups (list, download,
+  // on-demand create, global restore). They accept EITHER an admin session OR the
+  // CRON_SECRET bearer (cron/DR tooling). A bearer-only machine request has no session,
+  // so the gate would otherwise 401 it before the route's own guard runs — allow it
+  // through here (only when the bearer is actually valid) so DR tooling works without a
+  // cookie. The per-user singular routes (/api/backup, /api/restore) are NOT under this
+  // prefix and stay session-only.
+  const isGlobalBackupPath = (p) => p === '/api/backups' || p.startsWith('/api/backups/');
   function middleware() {
     return (req, res, next) => {
       const p = req.path.toLowerCase();
@@ -199,9 +231,12 @@ export function createAuth({ cronSecret, db, production = false } = {}) {
       if (p.startsWith('/api/cron/')) return next();
       authenticate(req)
         .then((user) => {
-          if (!user) return res.status(401).json({ error: 'Authentication required' });
-          req.user = user;
-          next();
+          if (user) {
+            req.user = user;
+            return next();
+          }
+          if (isGlobalBackupPath(p) && bearerPresentAndValid(req)) return next();
+          return res.status(401).json({ error: 'Authentication required' });
         })
         .catch(next);
     };
@@ -220,6 +255,8 @@ export function createAuth({ cronSecret, db, production = false } = {}) {
     clearSessionCookie,
     authenticate,
     cronAuthorized,
+    bearerPresentAndValid,
+    requireAdminSession,
     middleware,
     COOKIE_NAME,
   };

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { createClient } from '@libsql/client';
-import { createDb, MIGRATIONS, SCHEMA_SQL, SCHEMA_STATEMENTS } from '../db.js';
+import { createDb, MIGRATIONS, POST_MIGRATIONS, SCHEMA_SQL, SCHEMA_STATEMENTS } from '../db.js';
 
 // Async data facade. app.js constructs this synchronously (createApp stays sync),
 // but every method is async and awaits a `ready` promise first, so schema init can
@@ -157,6 +157,9 @@ function createLibsqlFacade({ url, authToken }) {
         if (!(await columnNames(m.table)).includes(m.column)) throw err;
       }
     }
+    // Data migrations (idempotent + concurrency-safe on their own) run after the
+    // columns they reference are guaranteed present. See db.js POST_MIGRATIONS.
+    for (const sql of POST_MIGRATIONS) await client.execute(sql);
   })();
   // Mark a pre-request init failure (e.g. Turso auth/network) as handled so it can't
   // fire unhandledRejection and kill the process; awaiters still get the rejection.

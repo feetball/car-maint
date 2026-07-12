@@ -136,6 +136,37 @@ describe('App auth gate', () => {
     expect(screen.getByRole('button', { name: /log out/i })).toBeInTheDocument();
   });
 
+  it('hides the Admin nav link for a non-admin user', async () => {
+    const fetchMock = vi.fn(async (url) => {
+      if (url === '/api/auth/status') {
+        return jsonResponse({ required: true, authenticated: true, username: 'sam', is_admin: false });
+      }
+      if (url === '/api/dashboard') return jsonResponse(emptyDashboard);
+      return jsonResponse({});
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderApp();
+
+    expect(await screen.findByRole('button', { name: /log out/i })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /admin/i })).not.toBeInTheDocument();
+  });
+
+  it('shows the Admin nav link for an admin user', async () => {
+    const fetchMock = vi.fn(async (url) => {
+      if (url === '/api/auth/status') {
+        return jsonResponse({ required: true, authenticated: true, username: 'daniel', is_admin: true });
+      }
+      if (url === '/api/dashboard') return jsonResponse(emptyDashboard);
+      return jsonResponse({});
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderApp();
+
+    expect(await screen.findByRole('link', { name: /admin/i })).toHaveAttribute('href', '/admin');
+  });
+
   it('logs out and returns to the auth gate', async () => {
     const user = userEvent.setup();
     let authenticated = true;

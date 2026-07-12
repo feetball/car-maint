@@ -35,11 +35,20 @@ export function authRouter(ctx) {
       const existing = await db.get('SELECT id FROM users WHERE username = ?', [username]);
       if (existing) throw new HttpError(409, 'username is already taken');
 
+      // First-ever account bootstraps the admin (product decision). Everyone after is
+      // a normal user; admins promote others via /api/admin. The COUNT==0 check and the
+      // INSERT are close enough that a true concurrent first-signup race is negligible
+      // for a self-hosted app; the UNIQUE username index still guarantees correctness of
+      // the accounts themselves, and an operator can re-assign admin if two truly-
+      // simultaneous first signups ever both saw an empty table.
+      const { n: userCount } = await db.get('SELECT COUNT(*) AS n FROM users');
+      const isAdmin = userCount === 0 ? 1 : 0;
+
       let userId;
       try {
         const info = await db.run(
-          'INSERT INTO users (username, password_hash, calendar_token) VALUES (?, ?, ?)',
-          [username, auth.hashPassword(password), auth.newCalendarToken()]
+          'INSERT INTO users (username, password_hash, calendar_token, is_admin) VALUES (?, ?, ?, ?)',
+          [username, auth.hashPassword(password), auth.newCalendarToken(), isAdmin]
         );
         userId = info.lastInsertRowid;
       } catch (err) {
@@ -49,7 +58,7 @@ export function authRouter(ctx) {
 
       const token = await auth.createSession(userId);
       auth.setSessionCookie(req, res, token);
-      res.status(201).json({ username });
+      res.status(201).json({ username, is_admin: !!isAdmin });
     })
   );
 
@@ -94,7 +103,13 @@ export function authRouter(ctx) {
     '/auth/status',
     asyncHandler(async (req, res) => {
       const user = await auth.authenticate(req);
-      if (user) res.json({ required: true, authenticated: true, username: user.username });
+      if (user)
+        res.json({
+          required: true,
+          authenticated: true,
+          username: user.username,
+          is_admin: user.is_admin,
+        });
       else res.json({ required: true, authenticated: false });
     })
   );

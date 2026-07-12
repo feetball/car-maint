@@ -30,7 +30,8 @@ describe('GET /api/auth/status', () => {
     const agent = await authAgent(app, { username: 'alice_1', password: 'password12345' });
     const res = await agent.get('/api/auth/status');
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ required: true, authenticated: true, username: 'alice_1' });
+    // First-ever user is the bootstrap admin, so is_admin is true here.
+    expect(res.body).toEqual({ required: true, authenticated: true, username: 'alice_1', is_admin: true });
   });
 
   it('is reachable without a session (never 401)', async () => {
@@ -43,7 +44,8 @@ describe('POST /api/register', () => {
   it('creates a user, returns 201 {username} and sets a session cookie (auto-login)', async () => {
     const res = await request(app).post('/api/register').send({ username: 'bob_2', password: 'password12345' });
     expect(res.status).toBe(201);
-    expect(res.body).toEqual({ username: 'bob_2' });
+    // First-ever user in a fresh app is the bootstrap admin.
+    expect(res.body).toEqual({ username: 'bob_2', is_admin: true });
     const setCookie = res.headers['set-cookie'];
     expect(Array.isArray(setCookie)).toBe(true);
     expect(setCookie.join(';')).toMatch(/carmaint_session=/);

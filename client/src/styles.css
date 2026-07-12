@@ -1588,6 +1588,53 @@ select {
   text-align: right;
 }
 
+/* --- Admin -------------------------------------------------------------------------------- */
+
+.admin-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  color: var(--accent-strong);
+  background: var(--warn-soft);
+  border: 1px solid rgba(232, 163, 61, 0.35);
+}
+
+.admin-badge--warn {
+  color: #ff8f88;
+  background: var(--danger-soft);
+  border: 1px solid rgba(229, 83, 75, 0.35);
+}
+
+.text-faint {
+  color: var(--text-faint);
+}
+
+.admin-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  justify-content: flex-end;
+  text-align: right;
+}
+
+.admin-adopt {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-3);
+}
+
+.admin-adopt .field {
+  min-width: 220px;
+}
+
 /* --- Touch devices: no hover-gated actions, bigger targets ------------------------------------------------ */
 
 @media (hover: none) {

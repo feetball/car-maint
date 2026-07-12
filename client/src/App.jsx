@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Link, NavLink, Route, Routes } from 'react-router-dom';
+import { Link, NavLink, Navigate, Route, Routes } from 'react-router-dom';
 import { api, setUnauthorizedHandler } from './api.js';
 import Icon from './components/Icon.jsx';
 import LoginView from './components/LoginView.jsx';
@@ -8,6 +8,7 @@ import Dashboard from './pages/Dashboard.jsx';
 import Vehicles from './pages/Vehicles.jsx';
 import VehicleDetail from './pages/VehicleDetail.jsx';
 import Backup from './pages/Backup.jsx';
+import Admin from './pages/Admin.jsx';
 
 const navClass = ({ isActive }) => `nav-link${isActive ? ' nav-link--active' : ''}`;
 
@@ -29,14 +30,18 @@ function NotFound() {
 }
 
 export default function App() {
-  // null = still checking; otherwise { authenticated, username? }. Auth is always
-  // required now (multi-user accounts), so there is no "auth disabled" path.
+  // null = still checking; otherwise { authenticated, username?, is_admin? }. Auth is
+  // always required now (multi-user accounts), so there is no "auth disabled" path.
   const [authState, setAuthState] = useState(null);
 
   const refreshStatus = useCallback(async () => {
     try {
       const status = await api.authStatus();
-      setAuthState({ authenticated: Boolean(status.authenticated), username: status.username });
+      setAuthState({
+        authenticated: Boolean(status.authenticated),
+        username: status.username,
+        is_admin: Boolean(status.is_admin),
+      });
     } catch {
       // Status endpoint unreachable — fail closed to the login gate.
       setAuthState({ authenticated: false });
@@ -93,6 +98,12 @@ export default function App() {
             <Icon name="cloud" size={17} />
             <span>Backup</span>
           </NavLink>
+          {authState.is_admin && (
+            <NavLink to="/admin" className={navClass}>
+              <Icon name="gear" size={17} />
+              <span>Admin</span>
+            </NavLink>
+          )}
         </nav>
         <div className="sidebar__account">
           {authState.username && (
@@ -119,6 +130,10 @@ export default function App() {
           <Route path="/vehicles" element={<Vehicles />} />
           <Route path="/vehicles/:id" element={<VehicleDetail />} />
           <Route path="/backup" element={<Backup />} />
+          <Route
+            path="/admin"
+            element={authState.is_admin ? <Admin /> : <Navigate to="/" replace />}
+          />
           <Route path="*" element={<NotFound />} />
         </Routes>
       </main>

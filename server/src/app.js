@@ -13,6 +13,7 @@ import { remindersRouter } from './routes/reminders.js';
 import { miscRouter } from './routes/misc.js';
 import { exportRouter } from './routes/export.js';
 import { backupRouter } from './routes/backup.js';
+import { adminRouter } from './routes/admin.js';
 import { vinRouter } from './routes/vin.js';
 import { recallsRouter } from './routes/recalls.js';
 import { cronRouter } from './routes/cron.js';
@@ -115,6 +116,10 @@ export function createApp(options = {}) {
   app.use('/api', miscRouter(ctx));
   app.use('/api', exportRouter(ctx));
   app.use('/api', backupRouter(ctx));
+  // Admin router: cross-account user/vehicle management + backup UI. Every route is
+  // behind auth.requireAdminSession (403 for non-admins). Mounted after the auth gate
+  // so req.user is set; before the /api 404.
+  app.use('/api', adminRouter(ctx));
   app.use('/api', vehiclesRouter(ctx));
   app.use('/api', photosRouter(ctx));
   app.use('/api', recordsRouter(ctx));

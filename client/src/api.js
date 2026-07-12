@@ -96,4 +96,27 @@ export const api = {
     form.append('backup', file);
     return request('/api/restore', { method: 'POST', body: form });
   },
+
+  // --- Admin (require an admin session; a 401 still trips the auth gate, a 403
+  // surfaces as a thrown Error the page shows inline) --------------------------
+  adminUsers: () => request('/api/admin/users'),
+  setUserAdmin: (id, isAdmin) =>
+    request(`/api/admin/users/${id}/admin`, { method: 'POST', body: { is_admin: isAdmin } }),
+  deleteUser: (id) => request(`/api/admin/users/${id}`, { method: 'DELETE' }),
+
+  adminVehicles: () => request('/api/admin/vehicles'),
+  setVehicleOwner: (id, userId) =>
+    request(`/api/admin/vehicles/${id}/owner`, { method: 'POST', body: { user_id: userId } }),
+  adoptOrphans: (userId) =>
+    request('/api/admin/vehicles/adopt-orphans', { method: 'POST', body: { user_id: userId } }),
+
+  // Global (whole-DB) backups — distinct from the per-user backup() above.
+  listGlobalBackups: () => request('/api/backups'),
+  createGlobalBackup: () => request('/api/backups', { method: 'POST' }),
+  downloadGlobalBackupUrl: (filename) => `/api/backups/${encodeURIComponent(filename)}`,
+  restoreGlobalBackup: (file) => {
+    const form = new FormData();
+    form.append('backup', file);
+    return request('/api/backups/restore', { method: 'POST', body: form });
+  },
 };

@@ -86,9 +86,18 @@ Set these environment variables in the Vercel project:
 | `TURSO_DATABASE_URL` | your `libsql://…` URL |
 | `TURSO_AUTH_TOKEN` | your Turso token |
 | `BLOB_READ_WRITE_TOKEN` | (auto-set by the Blob store) |
-| `CRON_SECRET` | any random string; guards the daily backup/notification crons and the global backup-download endpoints |
+| `CRON_SECRET` | any random string; guards the daily backup/notification crons, and authorizes cron/DR (machine) access to the global backup endpoints (admins reach those via their session instead) |
 
 Authentication is built in: users register their own username + password (open signup) and each account only ever sees its own vehicles — no `APP_PASSWORD`/`AUTH_SECRET` to set. Auth is always on.
+
+### Admin
+
+The **first account to register becomes the admin** — no configuration needed. (Upgrading an existing pre-accounts database? The migration promotes the earliest account by user id to admin automatically.) Admins can promote/demote other users, and admin powers never widen a user's view of their own data — cross-account access lives only under `/api/admin/*`. Admin capabilities:
+
+- **User management** — list all accounts (with vehicle counts), promote/demote admins, and delete an account (which removes its vehicles, service records, reminders, and photo files). The last remaining admin cannot be demoted or deleted.
+- **Cross-account vehicle view** — a read-only list of every vehicle and its owner, including legacy un-owned vehicles.
+- **Adopt orphaned vehicles** — assign un-owned (NULL-owner) legacy vehicles, or reassign any vehicle, to a chosen account.
+- **Global backups in the UI** — list, download, create, and restore the global whole-DB snapshots directly from an admin session. These endpoints (`/api/backups…`) accept **either an admin session or the `CRON_SECRET` bearer** (for cron/DR tooling); a non-admin user is refused. This replaces the previous "session **and** bearer" rule — the guarantee that an ordinary registered user can't read every account's data now comes from the admin role. `GET /calendar.ics` and the per-user `/api/backup` + `/api/restore` remain user-scoped and unchanged. **Global restore is destructive** — it replaces the entire database (all accounts) with the snapshot and invalidates every session; it is distinct from the additive per-user restore.
 
 The bundled `vercel.json` builds the SPA, routes `/api/*`, `/photos/*`, and `/calendar.ics` to the serverless function, and schedules daily backup + due-service-notification crons. Docker remains the primary path and needs none of these variables.
 

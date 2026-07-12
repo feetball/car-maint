@@ -70,15 +70,29 @@ describe('C2: case-insensitive routing does not bypass the auth gate', () => {
   });
 });
 
-describe('C1/I1: /api/backups requires a session even with a valid cron bearer', () => {
-  it('correct CRON bearer but NO session cookie → 401', async () => {
+// Contract evolved with roles: /api/backups is now "ADMIN session OR CRON bearer"
+// (previously "session AND bearer"). The original I1 concern — a mere registered user
+// must not read every account's data — still holds, now enforced by is_admin: a
+// non-admin is refused (403), while the admin UI (admin cookie) and DR tooling (bearer)
+// both work.
+describe('C1/I1: /api/backups is admin-session OR cron bearer', () => {
+  it('correct CRON bearer, NO session cookie → 200 (DR/machine path)', async () => {
     const secret = 'test-cron-secret-123';
     const appS = makeAppWithEnv(dataDir, { CRON_SECRET: secret });
     const res = await request(appS)
       .get('/api/backups')
       .set('Authorization', `Bearer ${secret}`);
-    expect(res.status).toBe(401);
-    expect(res.body.error).toBe('Authentication required');
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+  });
+
+  it('admin session, no bearer → 200 (backup UI path)', async () => {
+    const secret = 'test-cron-secret-123';
+    const appS = makeAppWithEnv(dataDir, { CRON_SECRET: secret });
+    const admin = await authAgent(appS); // first user is the bootstrap admin
+    const res = await admin.get('/api/backups');
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
   });
 
   it('session + correct CRON bearer → 200 (works)', async () => {
@@ -90,11 +104,19 @@ describe('C1/I1: /api/backups requires a session even with a valid cron bearer',
     expect(Array.isArray(res.body)).toBe(true);
   });
 
-  it('session but WRONG/absent bearer with CRON_SECRET set → 401', async () => {
+  it('NON-admin session, no bearer → 403 (mere user cannot read all data)', async () => {
     const secret = 'test-cron-secret-123';
     const appS = makeAppWithEnv(dataDir, { CRON_SECRET: secret });
-    const agent = await authAgent(appS);
-    const res = await agent.get('/api/backups'); // no bearer
+    await authAgent(appS); // admin (first)
+    const user = await authAgent(appS); // second user is not an admin
+    const res = await user.get('/api/backups');
+    expect(res.status).toBe(403);
+  });
+
+  it('no session and no bearer with CRON_SECRET set → 401', async () => {
+    const secret = 'test-cron-secret-123';
+    const appS = makeAppWithEnv(dataDir, { CRON_SECRET: secret });
+    const res = await request(appS).get('/api/backups'); // no cookie, no bearer
     expect(res.status).toBe(401);
   });
 });
@@ -106,11 +128,15 @@ describe('C1/I1: production fail-closed when CRON_SECRET is unset', () => {
     expect(res.status).toBe(401);
   });
 
-  it('VERCEL=1 + no CRON_SECRET: /api/backups (even with session) → 401', async () => {
+  it('VERCEL=1 + no CRON_SECRET: admin session → 200, non-admin → 403', async () => {
+    // With roles the admin (legitimate operator) reaches the backup UI even when no
+    // CRON_SECRET is set in production; a non-admin registered user still cannot,
+    // preserving the fail-closed intent for ordinary accounts.
     const appP = makeAppWithEnv(dataDir, { VERCEL: '1', CRON_SECRET: undefined });
-    const agent = await authAgent(appP);
-    const res = await agent.get('/api/backups');
-    expect(res.status).toBe(401);
+    const admin = await authAgent(appP); // first = admin
+    expect((await admin.get('/api/backups')).status).toBe(200);
+    const user = await authAgent(appP); // second = non-admin
+    expect((await user.get('/api/backups')).status).toBe(403);
   });
 
   it('NODE_ENV=production + no CRON_SECRET: /api/cron/notify → 401', async () => {
