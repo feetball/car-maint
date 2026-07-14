@@ -1545,7 +1545,13 @@ select {
 
 .table-scroll {
   overflow-x: auto;
+  overflow-y: hidden;
   -webkit-overflow-scrolling: touch;
+  /* Paint containment stops the wide table's scrollable width from leaking into the
+     document/ICB scrollWidth (a Chromium quirk with <table> inside overflow:auto),
+     which otherwise gave the whole page a phantom horizontal scroll on small screens.
+     The table still scrolls internally within this wrapper. */
+  contain: paint;
 }
 
 .backup-table {
@@ -1677,10 +1683,13 @@ select {
     top: 0;
     z-index: 40;
     width: 100%;
+    max-width: 100%;
+    min-width: 0;
     height: auto;
     flex-direction: row;
+    flex-wrap: wrap;
     align-items: center;
-    gap: var(--space-4);
+    gap: var(--space-2) var(--space-3);
     padding: calc(var(--space-2) + env(safe-area-inset-top)) calc(var(--space-4) + env(safe-area-inset-right))
       var(--space-2) calc(var(--space-4) + env(safe-area-inset-left));
     border-right: none;
@@ -1689,20 +1698,48 @@ select {
     backdrop-filter: blur(8px);
   }
 
-  .sidebar__nav {
-    flex-direction: row;
+  /* The brand and account cluster share the first row; the primary nav drops onto
+     its own full-width row and scrolls horizontally if it can't fit — this keeps the
+     top bar's min-content width at (or below) the viewport, which is what stops the
+     whole page from being forced wider than a small phone. */
+  .brand {
+    order: 1;
+    flex-shrink: 0;
+  }
+
+  .sidebar__account {
+    order: 2;
+    margin-top: 0;
     margin-left: auto;
+    flex-direction: row;
+    align-items: center;
+    gap: var(--space-2);
+    flex-shrink: 0;
+    min-width: 0;
+  }
+
+  .sidebar__nav {
+    order: 3;
+    flex-direction: row;
+    flex: 1 1 100%;
+    min-width: 0;
+    margin-left: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+
+  .sidebar__nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  .nav-link {
+    flex-shrink: 0;
   }
 
   .sidebar__footer {
     display: none;
-  }
-
-  .sidebar__account {
-    margin-top: 0;
-    flex-direction: row;
-    align-items: center;
-    gap: var(--space-2);
   }
 
   .account-chip__label {
@@ -1872,6 +1909,7 @@ select {
   align-items: center;
   gap: 10px;
   min-height: 44px;
+  min-width: 0;
   padding: 0 var(--space-3);
   border-radius: var(--radius-sm);
   color: var(--text-dim);
