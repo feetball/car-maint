@@ -328,20 +328,6 @@ export function createAuth({ cronSecret, db, production = false } = {}) {
   // of the path (the real req.path / routing is left untouched). Without this,
   // `/API/backups` would dodge the gate entirely and serve unauthenticated.
   const EXEMPT = new Set(['/api/register', '/api/login', '/api/logout', '/api/auth/status']);
-  // Paths reachable while only PASSWORD-authenticated (a pending 'login' or 'setup'
-  // state, no full session): the second-factor submit and every MFA management
-  // endpoint. Everything else under /api (the data API) and /photos stays blocked
-  // until a full session exists. This is the enforcement seam — MFA is required for
-  // everyone, so a pending user can ONLY finish MFA, nothing else.
-  // /api/login/mfa is the second-factor submit; /api/login/mfa/* are the WebAuthn
-  // assertion round-trip (options + verify), which also need the pending-login state.
-  // This is the SETUP-state surface: a setup-pending user (no active factor yet) is
-  // enrolling their FIRST factor, so they legitimately reach every enrollment endpoint.
-  const isMfaPath = (p) =>
-    p === '/api/login/mfa' ||
-    p.startsWith('/api/login/mfa/') ||
-    p === '/api/mfa' ||
-    p.startsWith('/api/mfa/');
   // The LOGIN-state allowlist. A login-pending user (password verified, but they
   // ALREADY have a confirmed second factor) must PROVE that factor — never enroll or
   // mutate one. So they may reach ONLY: the second-factor submit (/api/login/mfa),
@@ -383,27 +369,19 @@ export function createAuth({ cronSecret, db, production = false } = {}) {
             req.user = user;
             return next();
           }
-          // No full session. A valid pending token grants a LIMITED state that can
-          // only reach MFA endpoints (enroll / second-factor / status / logout).
+          // No full session. The only remaining limited state is 'login' pending: the
+          // password was verified but the user ALREADY has a confirmed second factor
+          // they must PROVE. (MFA is optional, so there is no longer a "setup" pending
+          // state — a user with no MFA gets a full session at /api/login directly.) A
+          // login-pending user may ONLY submit their factor / read status / request an
+          // email code (LOGIN_PENDING_ALLOW); enrollment + mutation + data endpoints are
+          // BLOCKED so a password-only attacker cannot overwrite the victim's factor or
+          // reach their data.
           const pending = await resolvePending(req);
-          if (pending) {
+          if (pending && pending.kind === 'login') {
             req.mfa = { userId: pending.user_id, kind: pending.kind, tokenHash: pending.tokenHash };
-            // Two distinct limited states, two distinct allowlists:
-            //   setup — no active factor yet; enrolling the first one is the whole
-            //           point, so the full MFA enrollment surface is reachable.
-            //   login — already has a factor; may ONLY submit it / read status / request
-            //           an email code. Enrollment + mutation endpoints are BLOCKED so a
-            //           password-only attacker cannot overwrite the victim's factor.
-            const allowed =
-              pending.kind === 'setup' ? isMfaPath(p) : LOGIN_PENDING_ALLOW.has(p);
-            if (allowed) return next();
-            // Data API / photos (and, for login-pending, the enrollment endpoints) are
-            // off-limits until MFA completes. Report the state so the client can route.
-            const body =
-              pending.kind === 'setup'
-                ? { error: 'MFA setup required', mfa_setup_required: true }
-                : { error: 'MFA required', mfa_pending: true };
-            return res.status(403).json(body);
+            if (LOGIN_PENDING_ALLOW.has(p)) return next();
+            return res.status(403).json({ error: 'MFA required', mfa_pending: true });
           }
           if (isGlobalBackupPath(p) && bearerPresentAndValid(req)) return next();
           return res.status(401).json({ error: 'Authentication required' });

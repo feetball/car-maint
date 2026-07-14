@@ -31,16 +31,18 @@ afterEach(() => {
   fs.rmSync(dataDir, { recursive: true, force: true });
 });
 
-// Register a user WITHOUT enrolling (leaves the agent in setup-required state).
+// Register a user (MFA optional → a FULL session, no enrollment). Returns the agent.
 async function registerOnly(a, username = 'user_setup', password = 'password12345') {
   const res = await a.post('/api/register').send({ username, password });
   expect(res.status).toBe(201);
-  expect(res.body).toMatchObject({ mfa_setup_required: true });
+  expect(res.body).toMatchObject({ mfa_enabled: false });
+  // Full session: the data API is reachable with no second factor.
+  expect((await a.get('/api/vehicles')).status).toBe(200);
   return { username, password };
 }
 
 describe('TOTP enrollment', () => {
-  it('setup returns secret + otpauth uri; wrong code 400; right code 200 + backup codes; activates MFA', async () => {
+  it('setup returns secret + otpauth uri; wrong code 400; right code 200 + backup codes; activates MFA; NO cookie change', async () => {
     const agent = request.agent(app);
     await registerOnly(agent);
 
@@ -58,14 +60,21 @@ describe('TOTP enrollment', () => {
     expect(good.body.mfa_enabled).toBe(true);
     expect(Array.isArray(good.body.backup_codes)).toBe(true);
     expect(good.body.backup_codes).toHaveLength(10);
-    // Completing setup upgrades to a full session (data API reachable).
-    expect(good.body.authenticated).toBe(true);
+    // Enrollment runs in the existing full session — it must NOT touch cookies (the
+    // Vercel multi-Set-Cookie bug at confirm is gone; no session churn here).
+    expect(good.headers['set-cookie']).toBeUndefined();
+    // Still fully in the session, and status now reports MFA active.
     expect((await agent.get('/api/vehicles')).status).toBe(200);
 
     const status = await agent.get('/api/mfa/status');
     expect(status.body).toMatchObject({
       methods: { totp: true, email: false },
       backup_codes_remaining: 10,
+      mfa_enabled: true,
+    });
+    // /api/auth/status flips mfa_enabled true without any re-auth.
+    expect((await agent.get('/api/auth/status')).body).toMatchObject({
+      authenticated: true,
       mfa_enabled: true,
     });
   });
@@ -79,10 +88,8 @@ describe('TOTP enrollment', () => {
 });
 
 describe('login state machine (TOTP)', () => {
-  it('register→setup blocked; enroll→full; logout; login→mfa_required blocked; wrong code caps out; right code→full', async () => {
-    // register → setup-required, data blocked
-    const agent = await authAgent(app, { username: 'sm_user', password: 'password12345' });
-    // authAgent already enrolled + full session
+  it('enroll→full; logout; login→mfa_required blocked; wrong code caps out; right code→full', async () => {
+    const agent = await authAgent(app, { username: 'sm_user', password: 'password12345', enroll: true });
     expect((await agent.get('/api/vehicles')).status).toBe(200);
 
     // logout
@@ -123,7 +130,7 @@ describe('login state machine (TOTP)', () => {
 
 describe('backup codes', () => {
   it('login with a backup code works; same code twice fails; remaining count decrements', async () => {
-    const agent = await authAgent(app, { username: 'bk_user' });
+    const agent = await authAgent(app, { username: 'bk_user', enroll: true });
     const codes = agent.backupCodes;
     await agent.post('/api/logout');
 
@@ -144,7 +151,7 @@ describe('backup codes', () => {
   });
 
   it('concurrent use of one backup code → exactly one succeeds', async () => {
-    const agent = await authAgent(app, { username: 'bk_race' });
+    const agent = await authAgent(app, { username: 'bk_race', enroll: true });
     const code = agent.backupCodes[0];
     await agent.post('/api/logout');
 
@@ -163,7 +170,7 @@ describe('backup codes', () => {
   });
 
   it('regenerate invalidates old codes and issues 10 new', async () => {
-    const agent = await authAgent(app, { username: 'bk_regen' });
+    const agent = await authAgent(app, { username: 'bk_regen', enroll: true });
     const old = agent.backupCodes[0];
 
     const regen = await agent.post('/api/mfa/backup/regenerate').send({});
@@ -249,7 +256,7 @@ describe('email method', () => {
   it('send-code during login is refused when email is not enrolled', async () => {
     const { mailer } = makeMailer();
     const appM = makeApp(dataDir, { mailer });
-    const agent = await authAgent(appM, { username: 'em_notenrolled' });
+    const agent = await authAgent(appM, { username: 'em_notenrolled', enroll: true });
     await agent.post('/api/logout');
     const a = request.agent(appM);
     await a.post('/api/login').send({ username: 'em_notenrolled', password: agent.password });
@@ -262,7 +269,7 @@ describe('last-factor guard', () => {
   it('cannot delete the only method (409); can delete one when two exist', async () => {
     const { mailer, lastCode } = makeMailer();
     const appM = makeApp(dataDir, { mailer });
-    const agent = await authAgent(appM, { username: 'lf_user' });
+    const agent = await authAgent(appM, { username: 'lf_user', enroll: true });
 
     // Only TOTP active → cannot delete it.
     const del1 = await agent.delete('/api/mfa/totp');
@@ -284,23 +291,24 @@ describe('last-factor guard', () => {
 });
 
 describe('admin MFA reset', () => {
-  it('admin clears a user MFA → user drops to setup_required', async () => {
+  it('admin clears a user MFA → user becomes skippable (full session, no MFA) on next login', async () => {
     const admin = await authAgent(app, { username: 'reset_admin' });
-    const user = await authAgent(app, { username: 'reset_target' });
+    const user = await authAgent(app, { username: 'reset_target', enroll: true });
     const uid = (await app.locals.ctx.db.get('SELECT id FROM users WHERE username = ?', ['reset_target'])).id;
 
     const reset = await admin.delete(`/api/admin/users/${uid}/mfa`);
     expect(reset.status).toBe(200);
-    expect(reset.body).toMatchObject({ reset: true, mfa_setup_required: true });
+    expect(reset.body).toMatchObject({ reset: true, mfa_enabled: false });
 
     // The target's live session was invalidated.
     expect((await user.get('/api/vehicles')).status).toBe(401);
 
-    // On re-login, the account is in setup-required (no active MFA).
+    // On re-login the account has no MFA → a FULL session immediately (skippable), NOT
+    // locked out. mfa_enabled:false so the client re-shows the setup nudge.
     const a = request.agent(app);
     const login = await a.post('/api/login').send({ username: 'reset_target', password: user.password });
-    expect(login.body).toMatchObject({ mfa_setup_required: true });
-    expect((await a.get('/api/vehicles')).status).toBe(403);
+    expect(login.body).toMatchObject({ username: 'reset_target', mfa_enabled: false });
+    expect((await a.get('/api/vehicles')).status).toBe(200);
 
     // A non-admin cannot reset anyone's MFA.
     const forbidden = await user.delete(`/api/admin/users/${uid}/mfa`);
@@ -308,26 +316,19 @@ describe('admin MFA reset', () => {
   });
 });
 
-describe('gate enforcement in pending states', () => {
-  it('setup-pending and login-pending states cannot reach data/photo/export routes', async () => {
-    // setup-pending
-    const s = request.agent(app);
-    await s.post('/api/register').send({ username: 'gate_setup', password: 'password12345' });
-    for (const p of ['/api/vehicles', '/photos/x.png', '/api/export/vehicles.csv', '/api/stats']) {
-      const r = await s.get(p);
-      expect(r.status).toBe(403);
-    }
-    // but MFA + status endpoints are reachable
-    expect((await s.get('/api/mfa/status')).status).toBe(200);
-    expect((await s.post('/api/mfa/totp/setup').send({})).status).toBe(200);
-
-    // login-pending
-    const enrolled = await authAgent(app, { username: 'gate_login' });
+describe('gate enforcement in the login-pending state', () => {
+  it('login-pending cannot reach data/photo/export routes (but status stays readable)', async () => {
+    const enrolled = await authAgent(app, { username: 'gate_login', enroll: true });
     await enrolled.post('/api/logout');
     const l = request.agent(app);
     await l.post('/api/login').send({ username: 'gate_login', password: enrolled.password });
-    expect((await l.get('/api/vehicles')).status).toBe(403);
+    for (const p of ['/api/vehicles', '/photos/x.png', '/api/export/vehicles.csv', '/api/stats']) {
+      const r = await l.get(p);
+      expect(r.status).toBe(403);
+    }
     expect((await l.get('/api/mfa/status')).status).toBe(200);
+    // Enrollment / mutation endpoints stay blocked in login-pending (account-takeover guard).
+    expect((await l.post('/api/mfa/totp/setup').send({})).status).toBe(403);
   });
 
   it('/api/auth/status reflects each state', async () => {
@@ -337,20 +338,21 @@ describe('gate enforcement in pending states', () => {
       authenticated: false,
     });
 
-    // setup-pending
-    const s = request.agent(app);
-    await s.post('/api/register').send({ username: 'st_setup', password: 'password12345' });
-    const setupStatus = await s.get('/api/auth/status');
-    expect(setupStatus.body).toMatchObject({
-      authenticated: false,
-      mfa_setup_required: true,
-      username: 'st_setup',
+    // full session, no MFA → authenticated with mfa_enabled:false (skippable)
+    const noMfa = await authAgent(app, { username: 'st_nomfa' });
+    expect((await noMfa.get('/api/auth/status')).body).toMatchObject({
+      authenticated: true,
+      username: 'st_nomfa',
+      mfa_enabled: false,
     });
 
-    // full session
-    const full = await authAgent(app, { username: 'st_full' });
-    const fullStatus = await full.get('/api/auth/status');
-    expect(fullStatus.body).toMatchObject({ authenticated: true, username: 'st_full' });
+    // full session, MFA enrolled → mfa_enabled:true
+    const full = await authAgent(app, { username: 'st_full', enroll: true });
+    expect((await full.get('/api/auth/status')).body).toMatchObject({
+      authenticated: true,
+      username: 'st_full',
+      mfa_enabled: true,
+    });
 
     // login-pending
     await full.post('/api/logout');
@@ -363,7 +365,7 @@ describe('gate enforcement in pending states', () => {
 
 describe('no account-existence leak before password', () => {
   it('unknown username never reveals MFA state (generic 401, no mfa fields)', async () => {
-    await authAgent(app, { username: 'known_user' });
+    await authAgent(app, { username: 'known_user', enroll: true });
     const res = await request(app).post('/api/login').send({ username: 'no_such_user', password: 'password12345' });
     expect(res.status).toBe(401);
     expect(res.body).toEqual({ error: 'Invalid username or password' });

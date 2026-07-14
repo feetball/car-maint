@@ -3,7 +3,7 @@ import request from 'supertest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { makeApp, authAgent, adminAndUserAgents } from './helpers.js';
+import { makeApp, authAgent } from './helpers.js';
 import { totpCode as totp } from '../src/mfa.js';
 import { LOGIN_RATELIMIT_MAX } from '../src/auth.js';
 
@@ -51,7 +51,7 @@ async function loginPending(theApp, username, password) {
 
 describe('CRITICAL: enrollment endpoints are blocked in the login-pending state', () => {
   it('every enroll/mutate MFA endpoint → 403 for kind=login', async () => {
-    const victim = await authAgent(app, { username: 'victim1', password: 'password12345' });
+    const victim = await authAgent(app, { username: 'victim1', password: 'password12345', enroll: true });
     await victim.post('/api/logout');
     const attacker = await loginPending(app, 'victim1', 'password12345');
 
@@ -71,7 +71,7 @@ describe('CRITICAL: enrollment endpoints are blocked in the login-pending state'
   it('the allowed second-factor surface still works for kind=login', async () => {
     const { mailer, lastCode } = makeMailer();
     const appM = makeApp(dataDir, { mailer });
-    const victim = await authAgent(appM, { username: 'victim2', password: 'password12345' });
+    const victim = await authAgent(appM, { username: 'victim2', password: 'password12345', enroll: true });
     // Enroll email as a SECOND factor (via the full session) so send-code has a
     // confirmed address to target during the challenge.
     await victim.post('/api/mfa/email/setup').send({ email: 'v2@example.com' });
@@ -97,7 +97,7 @@ describe('CRITICAL: enrollment endpoints are blocked in the login-pending state'
   });
 
   it('logout works in the login-pending state', async () => {
-    const victim = await authAgent(app, { username: 'victim3', password: 'password12345' });
+    const victim = await authAgent(app, { username: 'victim3', password: 'password12345', enroll: true });
     await victim.post('/api/logout');
     const a = await loginPending(app, 'victim3', 'password12345');
     const out = await a.post('/api/logout');
@@ -107,7 +107,7 @@ describe('CRITICAL: enrollment endpoints are blocked in the login-pending state'
   });
 
   it('exploit is DEAD: blocked totp/setup neither overwrites the victim secret nor mints a session', async () => {
-    const victim = await authAgent(app, { username: 'victim4', password: 'password12345' });
+    const victim = await authAgent(app, { username: 'victim4', password: 'password12345', enroll: true });
     const originalSecret = victim.totpSecret;
     await victim.post('/api/logout');
     const ctx = app.locals.ctx;
@@ -134,26 +134,34 @@ describe('CRITICAL: enrollment endpoints are blocked in the login-pending state'
     expect((await legit.get('/api/vehicles')).status).toBe(200);
   });
 
-  it('the SETUP state can still enroll the first factor and upgrade to a full session', async () => {
-    // Register only → setup-pending (no active factor yet).
+  it('a full-session user (no MFA yet) can enroll the first factor with NO cookie churn', async () => {
+    // MFA is optional: register grants a full session directly (no setup-pending state).
     const s = request.agent(app);
-    await s.post('/api/register').send({ username: 'setup_ok', password: 'password12345' });
+    const reg = await s.post('/api/register').send({ username: 'setup_ok', password: 'password12345' });
+    expect(reg.body).toMatchObject({ mfa_enabled: false });
+    expect((await s.get('/api/vehicles')).status).toBe(200); // already in the app
+
     const setup = await s.post('/api/mfa/totp/setup').send({});
-    expect(setup.status).toBe(200); // enrollment IS allowed in setup state
+    expect(setup.status).toBe(200);
     const confirm = await s.post('/api/mfa/totp/confirm').send({ code: totp(setup.body.secret_base32) });
     expect(confirm.status).toBe(200);
-    expect(confirm.body.authenticated).toBe(true); // upgraded to a full session
+    expect(confirm.body.mfa_enabled).toBe(true);
+    // No session transition at confirm — the Vercel multi-Set-Cookie bug is gone.
+    expect(confirm.headers['set-cookie']).toBeUndefined();
     expect((await s.get('/api/vehicles')).status).toBe(200);
+    // And the account is now MFA-enabled.
+    expect((await s.get('/api/auth/status')).body).toMatchObject({ mfa_enabled: true });
   });
 });
 
 describe('IMPORTANT #2: admin user-delete removes all MFA rows (no cascade reliance)', () => {
   it('mfa_totp / mfa_backup_codes / mfa_email / webauthn_credentials / mfa_challenges all gone', async () => {
-    const { admin, user } = await adminAndUserAgents(app);
+    const admin = await authAgent(app); // first user → bootstrap admin
+    const user = await authAgent(app, { enroll: true }); // enrolled → mfa_totp + backup codes
     const ctx = app.locals.ctx;
     const uid = (await ctx.db.get('SELECT id FROM users WHERE username = ?', [user.username])).id;
 
-    // authAgent already created mfa_totp + 10 mfa_backup_codes. Add email, a passkey
+    // The enrolled user has mfa_totp + 10 mfa_backup_codes. Add email, a passkey
     // credential, and a pending challenge row directly so all five tables are populated.
     await ctx.db.run('INSERT INTO mfa_email (user_id, email, confirmed_at) VALUES (?, ?, ?)', [
       uid, 'del@example.com', new Date().toISOString(),
@@ -187,7 +195,8 @@ describe('IMPORTANT #3: /api/login is rate-limited per account', () => {
     // Register (via authAgent — uses /api/register, not /api/login, so the login
     // counter starts clean) both a target and an untouched control account.
     await authAgent(app, { username: 'rl_target', password: 'password12345' });
-    await authAgent(app, { username: 'rl_other', password: 'password12345' });
+    // rl_other enrolls so its (unthrottled) correct-password login returns mfa_required.
+    await authAgent(app, { username: 'rl_other', password: 'password12345', enroll: true });
 
     // Exhaust the window for rl_target with wrong-password attempts (each counts).
     for (let i = 0; i < LOGIN_RATELIMIT_MAX; i++) {

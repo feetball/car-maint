@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -26,6 +26,12 @@ function renderApp() {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  // Onboarding-skip is persisted per username in localStorage — clear between tests.
+  try {
+    localStorage.clear();
+  } catch {
+    /* ignore */
+  }
 });
 
 describe('App auth gate', () => {
@@ -36,7 +42,7 @@ describe('App auth gate', () => {
       if (url === '/api/auth/status') {
         return jsonResponse(
           authenticated
-            ? { required: true, authenticated: true, username: 'daniel' }
+            ? { required: true, authenticated: true, username: 'daniel', mfa_enabled: true }
             : { required: true, authenticated: false }
         );
       }
@@ -44,7 +50,7 @@ describe('App auth gate', () => {
         const body = JSON.parse(options.body);
         if (body.username === 'daniel' && body.password === 'correct-horse') {
           authenticated = true;
-          return jsonResponse({ username: 'daniel' });
+          return jsonResponse({ username: 'daniel', mfa_enabled: true });
         }
         return jsonResponse({ error: 'Invalid username or password' }, { ok: false, status: 401 });
       }
@@ -101,7 +107,7 @@ describe('App auth gate', () => {
   it('flips back to the auth gate when a protected request returns 401', async () => {
     const fetchMock = vi.fn(async (url) => {
       if (url === '/api/auth/status') {
-        return jsonResponse({ required: true, authenticated: true, username: 'daniel' });
+        return jsonResponse({ required: true, authenticated: true, username: 'daniel', mfa_enabled: true });
       }
       if (url === '/api/dashboard') {
         return jsonResponse({ error: 'Authentication required' }, { ok: false, status: 401 });
@@ -120,7 +126,7 @@ describe('App auth gate', () => {
   it('renders the app with the username shown when already authenticated', async () => {
     const fetchMock = vi.fn(async (url) => {
       if (url === '/api/auth/status') {
-        return jsonResponse({ required: true, authenticated: true, username: 'daniel' });
+        return jsonResponse({ required: true, authenticated: true, username: 'daniel', mfa_enabled: true });
       }
       if (url === '/api/dashboard') return jsonResponse(emptyDashboard);
       return jsonResponse({});
@@ -139,7 +145,7 @@ describe('App auth gate', () => {
   it('hides the Admin nav link for a non-admin user', async () => {
     const fetchMock = vi.fn(async (url) => {
       if (url === '/api/auth/status') {
-        return jsonResponse({ required: true, authenticated: true, username: 'sam', is_admin: false });
+        return jsonResponse({ required: true, authenticated: true, username: 'sam', is_admin: false, mfa_enabled: true });
       }
       if (url === '/api/dashboard') return jsonResponse(emptyDashboard);
       return jsonResponse({});
@@ -155,7 +161,7 @@ describe('App auth gate', () => {
   it('shows the Admin nav link for an admin user', async () => {
     const fetchMock = vi.fn(async (url) => {
       if (url === '/api/auth/status') {
-        return jsonResponse({ required: true, authenticated: true, username: 'daniel', is_admin: true });
+        return jsonResponse({ required: true, authenticated: true, username: 'daniel', is_admin: true, mfa_enabled: true });
       }
       if (url === '/api/dashboard') return jsonResponse(emptyDashboard);
       return jsonResponse({});
@@ -174,7 +180,7 @@ describe('App auth gate', () => {
       if (url === '/api/auth/status') {
         return jsonResponse(
           authenticated
-            ? { required: true, authenticated: true, username: 'daniel' }
+            ? { required: true, authenticated: true, username: 'daniel', mfa_enabled: true }
             : {
                 required: true,
                 authenticated: false,
@@ -242,15 +248,15 @@ describe('App auth gate', () => {
     expect(screen.queryByRole('button', { name: /log out/i })).not.toBeInTheDocument();
   });
 
-  it('renders forced enrollment (mfa_setup_required), confirms TOTP, shows backup codes, then enters the app', async () => {
+  it('shows the skippable onboarding interstitial for a no-MFA user, enrolls TOTP, then enters the app', async () => {
     const user = userEvent.setup();
     let enrolled = false;
     const fetchMock = vi.fn(async (url, options) => {
       if (url === '/api/auth/status') {
         return jsonResponse(
           enrolled
-            ? { required: true, authenticated: true, username: 'newuser' }
-            : { required: true, authenticated: false, mfa_setup_required: true, username: 'newuser' }
+            ? { required: true, authenticated: true, username: 'newuser', mfa_enabled: true }
+            : { required: true, authenticated: true, username: 'newuser', mfa_enabled: false }
         );
       }
       if (url === '/api/mfa/totp/setup') {
@@ -264,9 +270,6 @@ describe('App auth gate', () => {
           confirmed: true,
           mfa_enabled: true,
           backup_codes: ['aaaaa-11111', 'bbbbb-22222'],
-          authenticated: true,
-          username: 'newuser',
-          is_admin: false,
         });
       }
       if (url === '/api/dashboard') return jsonResponse(emptyDashboard);
@@ -276,10 +279,9 @@ describe('App auth gate', () => {
 
     renderApp();
 
-    // Forced enrollment gate.
-    expect(
-      await screen.findByRole('heading', { name: /set up two-factor authentication/i })
-    ).toBeInTheDocument();
+    // Onboarding interstitial (a nudge, not a forced gate) with a Skip affordance.
+    expect(await screen.findByRole('heading', { name: /secure your account/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /skip for now/i })).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: /set up authenticator app/i }));
 
@@ -292,14 +294,61 @@ describe('App auth gate', () => {
     // Backup codes must be acknowledged before entering the app.
     expect(await screen.findByText('aaaaa-11111')).toBeInTheDocument();
     expect(screen.getByText('bbbbb-22222')).toBeInTheDocument();
-    // Not in the app yet — the acknowledge gate is showing.
     const ackButton = screen.getByRole('button', { name: /i saved them/i });
     expect(screen.queryByRole('navigation', { name: /primary/i })).not.toBeInTheDocument();
 
     await user.click(ackButton);
 
-    // Now in the app.
+    // Now in the app, and (MFA now enabled) no nudge banner.
     expect(await screen.findByRole('button', { name: /log out/i })).toBeInTheDocument();
+    expect(screen.queryByText(/two-factor authentication is not enabled/i)).not.toBeInTheDocument();
+  });
+
+  it('skips the interstitial and enters the app with the persistent nudge banner', async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn(async (url) => {
+      if (url === '/api/auth/status') {
+        return jsonResponse({ required: true, authenticated: true, username: 'skipper', mfa_enabled: false });
+      }
+      if (url === '/api/dashboard') return jsonResponse(emptyDashboard);
+      return jsonResponse({});
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderApp();
+
+    await user.click(await screen.findByRole('button', { name: /skip for now/i }));
+
+    // In the app now, and the persistent banner offers setup + dismiss.
+    expect(await screen.findByRole('button', { name: /log out/i })).toBeInTheDocument();
+    expect(screen.getByText(/two-factor authentication is not enabled/i)).toBeInTheDocument();
+    const banner = screen.getByRole('status');
+    expect(within(banner).getByRole('link', { name: /set up/i })).toHaveAttribute('href', '/security');
+
+    // Dismissing hides the banner for the session.
+    await user.click(within(banner).getByRole('button', { name: /dismiss/i }));
+    expect(screen.queryByText(/two-factor authentication is not enabled/i)).not.toBeInTheDocument();
+  });
+
+  it('does not re-show the interstitial on reload after a skip (persisted per user)', async () => {
+    const fetchMock = vi.fn(async (url) => {
+      if (url === '/api/auth/status') {
+        return jsonResponse({ required: true, authenticated: true, username: 'skipper2', mfa_enabled: false });
+      }
+      if (url === '/api/dashboard') return jsonResponse(emptyDashboard);
+      return jsonResponse({});
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    // Pre-seed the skip flag as if a prior session dismissed the interstitial.
+    localStorage.setItem('carmaint.mfaSkip.skipper2', '1');
+
+    renderApp();
+
+    // Straight into the app (no interstitial), banner still present.
+    expect(await screen.findByRole('button', { name: /log out/i })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: /secure your account/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/two-factor authentication is not enabled/i)).toBeInTheDocument();
   });
 
   it('logs out and returns to the auth gate', async () => {
@@ -309,7 +358,7 @@ describe('App auth gate', () => {
       if (url === '/api/auth/status') {
         return jsonResponse(
           authenticated
-            ? { required: true, authenticated: true, username: 'daniel' }
+            ? { required: true, authenticated: true, username: 'daniel', mfa_enabled: true }
             : { required: true, authenticated: false }
         );
       }

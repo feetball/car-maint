@@ -42,6 +42,74 @@ describe('Security (two-factor settings)', () => {
     expect(screen.getByRole('button', { name: /add email code/i })).toBeInTheDocument();
   });
 
+  it('shows "Not enabled" with setup affordances when mfa_enabled is false', async () => {
+    const offStatus = {
+      methods: { totp: false, email: false, webauthn: false },
+      backup_codes_remaining: 0,
+      webauthn: { count: 0, credentials: [] },
+      mfa_enabled: false,
+    };
+    const fetchMock = vi.fn(async (url) => {
+      if (url === '/api/mfa/status') return jsonResponse(offStatus);
+      return jsonResponse({});
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<Security />);
+
+    // The permanent "profile entry": a clear Not-enabled state.
+    expect(await screen.findByText('Not enabled')).toBeInTheDocument();
+    // Prominent set-up actions for each method.
+    expect(screen.getByRole('button', { name: /add authenticator app/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /add a passkey/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /add email code/i })).toBeInTheDocument();
+    // No "Enabled" badge anywhere.
+    expect(screen.queryByText('Enabled')).not.toBeInTheDocument();
+  });
+
+  it('flips to enabled after enrolling TOTP from the not-enabled state', async () => {
+    const user = userEvent.setup();
+    let enabled = false;
+    const offStatus = {
+      methods: { totp: false, email: false, webauthn: false },
+      backup_codes_remaining: 0,
+      webauthn: { count: 0, credentials: [] },
+      mfa_enabled: false,
+    };
+    const onStatus = {
+      ...offStatus,
+      methods: { totp: true, email: false, webauthn: false },
+      backup_codes_remaining: 10,
+      mfa_enabled: true,
+    };
+    const fetchMock = vi.fn(async (url, options = {}) => {
+      if (url === '/api/mfa/status') return jsonResponse(enabled ? onStatus : offStatus);
+      if (url === '/api/mfa/totp/setup') {
+        return jsonResponse({ secret_base32: 'JBSWY3DPEHPK3PXP', otpauth_uri: 'otpauth://totp/x' });
+      }
+      if (url === '/api/mfa/totp/confirm' && options.method === 'POST') {
+        enabled = true;
+        return jsonResponse({ confirmed: true, mfa_enabled: true, backup_codes: ['aaaaa-11111'] });
+      }
+      return jsonResponse({});
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<Security />);
+
+    expect(await screen.findByText('Not enabled')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /add authenticator app/i }));
+    // The inline TotpEnroll widget then needs its own "Set up" click to fetch the secret.
+    await user.click(await screen.findByRole('button', { name: /set up authenticator app/i }));
+    await user.type(await screen.findByLabelText('Authenticator code'), '654321');
+    await user.click(screen.getByRole('button', { name: /verify & enable/i }));
+
+    // Backup codes are shown, then status reflects Enabled.
+    expect(await screen.findByText('aaaaa-11111')).toBeInTheDocument();
+    expect((await screen.findAllByText('Enabled')).length).toBeGreaterThanOrEqual(1);
+    expect(screen.queryByText('Not enabled')).not.toBeInTheDocument();
+  });
+
   it('shows the last-factor 409 message inline when removing the only remaining factor', async () => {
     // Only TOTP active — removing it is the last factor.
     const soloStatus = {

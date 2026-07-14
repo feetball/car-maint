@@ -45,11 +45,11 @@ describe('bootstrap admin on registration', () => {
 
   it('register response echoes is_admin', async () => {
     const first = await request(app).post('/api/register').send({ username: 'first_one', password: 'password12345' });
-    // Registration now enters the setup-required state (MFA required for everyone),
-    // but still echoes is_admin so the client knows the first user is the bootstrap admin.
-    expect(first.body).toEqual({ username: 'first_one', is_admin: true, mfa_setup_required: true });
+    // Registration grants a full session (MFA optional) and echoes is_admin so the client
+    // knows the first user is the bootstrap admin; mfa_enabled:false drives the setup nudge.
+    expect(first.body).toEqual({ username: 'first_one', is_admin: true, mfa_enabled: false });
     const second = await request(app).post('/api/register').send({ username: 'second_one', password: 'password12345' });
-    expect(second.body).toEqual({ username: 'second_one', is_admin: false, mfa_setup_required: true });
+    expect(second.body).toEqual({ username: 'second_one', is_admin: false, mfa_enabled: false });
   });
 });
 

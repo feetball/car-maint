@@ -82,8 +82,10 @@ describe('existing CRON bearer path still works', () => {
 
 describe('global restore (admin-gated, whole-DB replace)', () => {
   it('replaces the entire DB from a global backup and is admin-gated', async () => {
-    // Seed a two-user world and take a GLOBAL backup.
-    const { admin, user } = await adminAndUserAgents(app);
+    // Seed a two-user world and take a GLOBAL backup. Both enroll TOTP so the
+    // password+TOTP re-login after the session-wiping restore is exercised.
+    const admin = await authAgent(app, { enroll: true });
+    const user = await authAgent(app, { enroll: true });
     const av = await makeVehicle(admin, { name: 'Admin Car' });
     await addRecord(admin, av.id, { date: '2024-03-03', cost: 55 });
     await makeVehicle(user, { name: 'User Car' });

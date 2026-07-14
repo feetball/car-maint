@@ -11,7 +11,10 @@ import { formatDate } from '../utils/format.js';
 // user add/remove each factor, list + name + remove passkeys, and regenerate backup
 // codes. The last-factor guard is a server 409 ("add another before removing this
 // one") which we surface inline per action.
-export default function Security() {
+// `onStatusChange` (optional) notifies the parent (App) when the MFA-enabled state may
+// have changed — after enrolling or removing a factor — so the app-level setup nudge
+// banner re-syncs with /api/auth/status. Enrollment/removal happen from a full session.
+export default function Security({ onStatusChange } = {}) {
   const [status, setStatus] = useState(null);
   const [error, setError] = useState(null);
   // Which method is being added inline: null | 'totp' | 'passkey' | 'email'.
@@ -55,6 +58,7 @@ export default function Security() {
       setNewCodes(result.backup_codes);
     }
     await load();
+    onStatusChange?.();
   }
 
   async function handleRegenerate() {
@@ -82,6 +86,7 @@ export default function Security() {
       else if (target.kind === 'passkey') await api.deletePasskey(target.id);
       setPendingRemove(null);
       await load();
+      onStatusChange?.();
     } catch (err) {
       setPendingRemove(null);
       noteError(target.key, err.message);
@@ -95,16 +100,22 @@ export default function Security() {
 
   const { methods, webauthn } = status;
   const passkeys = webauthn?.credentials || [];
+  const mfaEnabled = Boolean(status.mfa_enabled);
 
   return wrap(
     <>
       <section className="panel">
         <h2 className="panel__title">
-          <Icon name="check" size={16} /> Your factors
+          <Icon name="check" size={16} /> Two-factor authentication
         </h2>
-        <p className="backup-note">
-          Two-factor authentication is <strong>required</strong>. You always need at least one
-          active method — add another before removing your last one.
+        <p className={`mfa-state ${mfaEnabled ? 'mfa-state--on' : 'mfa-state--off'}`}>
+          <Icon name={mfaEnabled ? 'check' : 'x'} size={16} />
+          <strong>{mfaEnabled ? 'Enabled' : 'Not enabled'}</strong>
+          <span>
+            {mfaEnabled
+              ? 'Your account is protected by a second factor. Add another before removing your last one.'
+              : 'Your account is protected by your password only. Add a method below to secure it.'}
+          </span>
         </p>
         <ul className="mfa-summary">
           <li className={methods.totp ? 'is-on' : ''}>

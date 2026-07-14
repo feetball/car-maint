@@ -26,9 +26,11 @@ import {
   parseTransports,
 } from '../mfa.js';
 
-// Enrollment / management endpoints. Reachable with EITHER a full session (req.user)
-// OR the limited setup/login-pending state (req.mfa) — the gate lets /api/mfa/* and
-// /api/login/mfa through in both. mfaUserId() reads whichever is present.
+// Enrollment / management endpoints. Enrollment + mutation run in a FULL session
+// (req.user) — MFA is optional, so users enroll from inside the app. A login-pending
+// user (req.mfa, kind='login') only reaches the read-only /mfa/status and the
+// /mfa/email/send-code login helper (LOGIN_PENDING_ALLOW in the gate). mfaUserId()
+// reads whichever identity is present.
 //
 // WebAuthn extension point: add /api/mfa/webauthn/register + /verify here; the
 // activeMethods()/hasActiveMFA()/last-factor-guard machinery already generalizes.
@@ -53,25 +55,13 @@ export function mfaRouter(ctx) {
     next();
   });
 
-  // If the requester is in a pending (setup/login) state and now has active MFA,
-  // upgrade them to a real session: burn the pending token, set the session cookie.
-  // Returns the session fields to fold into the response, or {} for a full session.
-  async function maybeUpgradeSession(req, res) {
-    if (!req.mfa) return {};
-    // Defense in depth: ONLY the setup state (first enrollment) may be upgraded to a
-    // full session by an enrollment endpoint. A login-pending request has an existing
-    // factor it must PROVE via /api/login/mfa* — it must never be upgraded here, even
-    // if an enrollment endpoint were somehow reached. (The auth gate already blocks
-    // those endpoints for kind='login'; this is the belt-and-suspenders second layer.)
-    if (req.mfa.kind !== 'setup') return {};
-    if (!(await hasActiveMFA(db, req.mfa.userId))) return {};
-    await auth.deletePending(req.mfa.tokenHash);
-    auth.clearMfaCookie(req, res);
-    const token = await auth.createSession(req.mfa.userId);
-    auth.setSessionCookie(req, res, token);
-    const u = await db.get('SELECT username, is_admin FROM users WHERE id = ?', [req.mfa.userId]);
-    return { authenticated: true, username: u.username, is_admin: !!u.is_admin };
-  }
+  // Enrollment now always happens from a FULL session (MFA is optional — login/register
+  // grant a session directly, and the gate blocks a login-pending user from every
+  // enrollment endpoint). So confirming a factor never needs a cookie/session transition:
+  // there is no pending-state upgrade here. This is also the second half of the Vercel
+  // multi-Set-Cookie fix — the reported "authentication required" bug happened when a
+  // confirm response tried to clear carmaint_mfa AND set carmaint_session at once; now a
+  // confirm from a full session emits NO Set-Cookie at all.
 
   async function statusPayload(userId) {
     const active = await activeMethods(db, userId);
@@ -121,8 +111,8 @@ export function mfaRouter(ctx) {
   );
 
   // POST /api/mfa/totp/confirm {code} → verify against the pending secret. On the
-  // FIRST activation, generate + return 10 backup codes (once). Activating from a
-  // pending state upgrades the caller to a full session.
+  // FIRST activation, generate + return 10 backup codes (once). Runs in a full session
+  // and makes NO cookie change.
   router.post(
     '/mfa/totp/confirm',
     asyncHandler(async (req, res) => {
@@ -152,8 +142,7 @@ export function mfaRouter(ctx) {
         backupCodes = await issueBackupCodes(userId);
       }
 
-      const session = await maybeUpgradeSession(req, res);
-      res.json({ confirmed: true, mfa_enabled: true, backup_codes: backupCodes, ...session });
+      res.json({ confirmed: true, mfa_enabled: true, backup_codes: backupCodes });
     })
   );
 
@@ -267,8 +256,7 @@ export function mfaRouter(ctx) {
         'UPDATE mfa_email SET confirmed_at = COALESCE(confirmed_at, ?), code_hash = NULL, code_expires_at = NULL, attempts = 0 WHERE user_id = ?',
         [new Date().toISOString(), userId]
       );
-      const session = await maybeUpgradeSession(req, res);
-      res.json({ confirmed: true, mfa_enabled: true, ...session });
+      res.json({ confirmed: true, mfa_enabled: true });
     })
   );
 
@@ -457,12 +445,10 @@ export function mfaRouter(ctx) {
       let backupCodes = null;
       if (!hadMfaBefore) backupCodes = await issueBackupCodes(userId);
 
-      const session = await maybeUpgradeSession(req, res);
       res.json({
         verified: true,
         credential: { id: credentialId, name },
         backup_codes: backupCodes,
-        ...session,
       });
     })
   );

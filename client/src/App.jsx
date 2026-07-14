@@ -32,16 +32,38 @@ function NotFound() {
   );
 }
 
+// Per-username localStorage flag recording that the user dismissed the MFA setup
+// interstitial ("Skip for now"). Keeps the onboarding nudge from re-appearing on every
+// load, while the persistent banner + Security entry still advertise that MFA is off.
+const skipKey = (username) => `carmaint.mfaSkip.${username || ''}`;
+function readOnboardSkip(username) {
+  try {
+    return localStorage.getItem(skipKey(username)) === '1';
+  } catch {
+    return false;
+  }
+}
+function writeOnboardSkip(username) {
+  try {
+    localStorage.setItem(skipKey(username), '1');
+  } catch {
+    /* ignore storage failures (private mode / disabled) */
+  }
+}
+
 export default function App() {
-  // null = still checking. Otherwise a normalized view of GET /api/auth/status:
-  //   { authenticated:true, ... }        → full app
-  //   { mfaPending:true, methods, ... }  → login second-factor screen
-  //   { mfaSetup:true, ... }             → forced enrollment screen
-  //   { authenticated:false }            → login / register gate
-  // Auth is always required now (multi-user accounts), so there is no "auth disabled" path.
+  // null = still checking. Otherwise a normalized view of GET /api/auth/status. MFA is
+  // OPTIONAL now, so there are three states:
+  //   { authenticated:true, mfaEnabled, ... } → full app (nudge shown when !mfaEnabled)
+  //   { mfaPending:true, methods, ... }        → login second-factor screen
+  //   { authenticated:false }                  → login / register gate
   const [authState, setAuthState] = useState(null);
   // A short notice shown on the login gate (e.g. after a burned MFA challenge).
   const [loginNotice, setLoginNotice] = useState(null);
+  // The onboarding interstitial (skippable MFA setup) has been dismissed for this user.
+  const [onboardSkipped, setOnboardSkipped] = useState(false);
+  // The persistent MFA nudge banner was dismissed for this session.
+  const [bannerDismissed, setBannerDismissed] = useState(false);
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -49,11 +71,12 @@ export default function App() {
       setAuthState({
         authenticated: Boolean(status.authenticated),
         mfaPending: Boolean(status.mfa_pending),
-        mfaSetup: Boolean(status.mfa_setup_required),
+        mfaEnabled: Boolean(status.mfa_enabled),
         methods: status.methods || [],
         username: status.username,
         is_admin: Boolean(status.is_admin),
       });
+      setOnboardSkipped(readOnboardSkip(status.username));
     } catch {
       // Status endpoint unreachable — fail closed to the login gate.
       setAuthState({ authenticated: false });
@@ -75,11 +98,12 @@ export default function App() {
     } catch {
       /* clear locally regardless of the server's response */
     }
+    setBannerDismissed(false);
     setAuthState({ authenticated: false });
   }
 
-  // Leave a pending (login-second-factor or setup) state: drop the pending token
-  // server-side and return to the login gate.
+  // Leave a pending (login second-factor) state: drop the pending token server-side
+  // and return to the login gate.
   async function handleCancelPending() {
     try {
       await api.logout();
@@ -87,6 +111,14 @@ export default function App() {
       /* ignore */
     }
     await refreshStatus();
+  }
+
+  // "Skip for now" on the onboarding interstitial: remember the dismissal for this user
+  // (so it is not shown every load) and drop into the app. The banner + Security entry
+  // still advertise that MFA is off.
+  function handleSkipOnboarding() {
+    writeOnboardSkip(authState?.username);
+    setOnboardSkipped(true);
   }
 
   function toLoginWithNotice(message) {
@@ -103,15 +135,6 @@ export default function App() {
   }
 
   if (!authState.authenticated) {
-    if (authState.mfaSetup) {
-      return (
-        <EnrollView
-          username={authState.username}
-          onDone={refreshStatus}
-          onLogout={handleCancelPending}
-        />
-      );
-    }
     if (authState.mfaPending) {
       return (
         <SecondFactorView
@@ -125,6 +148,22 @@ export default function App() {
     }
     return <LoginView onAuthenticated={refreshStatus} notice={loginNotice} />;
   }
+
+  // Authenticated but no second factor yet, and they have not skipped the nudge → show
+  // the skippable onboarding interstitial (reuses EnrollView). Enrolling flips
+  // mfaEnabled true (interstitial gone); "Skip for now" persists the dismissal.
+  const needsMfaSetup = !authState.mfaEnabled;
+  if (needsMfaSetup && !onboardSkipped) {
+    return (
+      <EnrollView
+        username={authState.username}
+        onDone={refreshStatus}
+        onSkip={handleSkipOnboarding}
+      />
+    );
+  }
+
+  const showBanner = needsMfaSetup && !bannerDismissed;
 
   return (
     <div className="app-shell">
@@ -179,12 +218,34 @@ export default function App() {
         <p className="sidebar__footer">Every mile, accounted for.</p>
       </aside>
       <main className="app-main">
+        {showBanner && (
+          <div className="mfa-nudge" role="status">
+            <span className="mfa-nudge__icon" aria-hidden="true">
+              <Icon name="check" size={16} />
+            </span>
+            <span className="mfa-nudge__text">
+              Two-factor authentication is not enabled. Set it up to secure your account.
+            </span>
+            <span className="mfa-nudge__actions">
+              <Link to="/security" className="button button--primary button--small">
+                Set up
+              </Link>
+              <button
+                type="button"
+                className="button button--ghost button--small"
+                onClick={() => setBannerDismissed(true)}
+              >
+                Dismiss
+              </button>
+            </span>
+          </div>
+        )}
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/vehicles" element={<Vehicles />} />
           <Route path="/vehicles/:id" element={<VehicleDetail />} />
           <Route path="/backup" element={<Backup />} />
-          <Route path="/security" element={<Security />} />
+          <Route path="/security" element={<Security onStatusChange={refreshStatus} />} />
           <Route
             path="/admin"
             element={authState.is_admin ? <Admin /> : <Navigate to="/" replace />}

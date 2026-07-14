@@ -30,8 +30,21 @@ describe('GET /api/auth/status', () => {
     const agent = await authAgent(app, { username: 'alice_1', password: 'password12345' });
     const res = await agent.get('/api/auth/status');
     expect(res.status).toBe(200);
-    // First-ever user is the bootstrap admin, so is_admin is true here.
-    expect(res.body).toEqual({ required: true, authenticated: true, username: 'alice_1', is_admin: true });
+    // First-ever user is the bootstrap admin, so is_admin is true here. No MFA enrolled
+    // (registration alone grants a full session), so mfa_enabled is false.
+    expect(res.body).toEqual({
+      required: true,
+      authenticated: true,
+      username: 'alice_1',
+      is_admin: true,
+      mfa_enabled: false,
+    });
+  });
+
+  it('reports mfa_enabled:true once a factor is enrolled', async () => {
+    const agent = await authAgent(app, { username: 'alice_mfa', password: 'password12345', enroll: true });
+    const res = await agent.get('/api/auth/status');
+    expect(res.body).toMatchObject({ authenticated: true, mfa_enabled: true });
   });
 
   it('is reachable without a session (never 401)', async () => {
@@ -41,25 +54,26 @@ describe('GET /api/auth/status', () => {
 });
 
 describe('POST /api/register', () => {
-  it('creates a user, returns 201 setup-required and sets the pending MFA cookie (no session yet)', async () => {
+  it('creates a user, returns 201 with a full session (mfa optional) via a SINGLE session cookie', async () => {
     const res = await request(app).post('/api/register').send({ username: 'bob_2', password: 'password12345' });
     expect(res.status).toBe(201);
-    // MFA is required for everyone: registration yields the limited setup-required
-    // state, NOT a full session. First-ever user is still the bootstrap admin.
-    expect(res.body).toEqual({ username: 'bob_2', is_admin: true, mfa_setup_required: true });
+    // MFA is optional: registration grants a FULL session immediately. mfa_enabled:false
+    // tells the client to show the setup nudge. First-ever user is the bootstrap admin.
+    expect(res.body).toEqual({ username: 'bob_2', is_admin: true, mfa_enabled: false });
     const setCookie = res.headers['set-cookie'];
     expect(Array.isArray(setCookie)).toBe(true);
-    // The pending MFA cookie is set; the real session cookie is NOT.
-    expect(setCookie.join(';')).toMatch(/carmaint_mfa=/);
-    expect(setCookie.join(';')).not.toMatch(/carmaint_session=/);
-    expect(setCookie.join(';')).toMatch(/HttpOnly/i);
+    // Exactly ONE Set-Cookie and it is the session cookie (no carmaint_mfa churn).
+    expect(setCookie).toHaveLength(1);
+    expect(setCookie[0]).toMatch(/carmaint_session=/);
+    expect(setCookie[0]).not.toMatch(/carmaint_mfa=/);
+    expect(setCookie[0]).toMatch(/HttpOnly/i);
 
-    // The setup state cannot reach the data API.
+    // The new account reaches the data API immediately (no MFA gate).
     const agent = request.agent(app);
     await agent.post('/api/register').send({ username: 'bob_2b', password: 'password12345' });
-    const blocked = await agent.get('/api/vehicles');
-    expect(blocked.status).toBe(403);
-    expect(blocked.body).toMatchObject({ mfa_setup_required: true });
+    const ok = await agent.get('/api/vehicles');
+    expect(ok.status).toBe(200);
+    expect(Array.isArray(ok.body)).toBe(true);
   });
 
   it('rejects a too-short username and a too-short password with 400', async () => {
@@ -85,9 +99,23 @@ describe('POST /api/register', () => {
 });
 
 describe('POST /api/login', () => {
+  it('no MFA: correct password grants a full session immediately via a SINGLE session cookie', async () => {
+    await authAgent(app, { username: 'nomfa_1', password: 'password12345' });
+    const agent = request.agent(app);
+    const res = await agent.post('/api/login').send({ username: 'nomfa_1', password: 'password12345' });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ username: 'nomfa_1', is_admin: true, mfa_enabled: false });
+    const setCookie = res.headers['set-cookie'];
+    expect(setCookie).toHaveLength(1);
+    expect(setCookie[0]).toMatch(/carmaint_session=/);
+    expect(setCookie[0]).not.toMatch(/carmaint_mfa=/);
+    // Full session → data API reachable with no second factor.
+    expect((await agent.get('/api/vehicles')).status).toBe(200);
+  });
+
   it('with MFA enrolled: correct password returns mfa_required (no session yet), then TOTP grants access', async () => {
-    // authAgent enrolls TOTP; log a fresh agent through the two-step flow.
-    const enrolled = await authAgent(app, { username: 'dave_4', password: 'password12345' });
+    // Enroll TOTP; log a fresh agent through the two-step flow.
+    const enrolled = await authAgent(app, { username: 'dave_4', password: 'password12345', enroll: true });
 
     const agent = request.agent(app);
     const step1 = await agent.post('/api/login').send({ username: 'dave_4', password: 'password12345' });
@@ -100,14 +128,37 @@ describe('POST /api/login', () => {
     const step2 = await agent.post('/api/login/mfa').send({ code: totpCode(enrolled.totpSecret) });
     expect(step2.status).toBe(200);
     expect(step2.body).toEqual({ username: 'dave_4', is_admin: true });
+    // The Vercel multi-Set-Cookie fix: a session-granting response carries EXACTLY ONE
+    // Set-Cookie and it is the session (the inert carmaint_mfa cookie is NOT cleared here).
+    const sc = step2.headers['set-cookie'];
+    expect(sc).toHaveLength(1);
+    expect(sc[0]).toMatch(/carmaint_session=/);
+    expect(sc[0]).not.toMatch(/carmaint_mfa=/);
 
     const guarded = await agent.get('/api/vehicles');
     expect(guarded.status).toBe(200);
     expect(Array.isArray(guarded.body)).toBe(true);
   });
 
+  it('a valid session wins even when a stale carmaint_mfa cookie is still present', async () => {
+    // Simulate the Vercel scenario: the client keeps the (now inert) carmaint_mfa cookie
+    // alongside the freshly-granted session. authenticate() runs before resolvePending in
+    // the gate, so the session takes precedence and the data API is reachable.
+    const enrolled = await authAgent(app, { username: 'stale_1', password: 'password12345', enroll: true });
+    const agent = request.agent(app);
+    await agent.post('/api/login').send({ username: 'stale_1', password: 'password12345' });
+    const done = await agent.post('/api/login/mfa').send({ code: totpCode(enrolled.totpSecret) });
+    expect(done.status).toBe(200);
+    const session = /carmaint_session=([^;]+)/.exec(done.headers['set-cookie'][0])[1];
+    // Present BOTH a valid session and an arbitrary stale mfa cookie value.
+    const res = await request(app)
+      .get('/api/vehicles')
+      .set('Cookie', `carmaint_session=${session}; carmaint_mfa=deadbeefstaletoken`);
+    expect(res.status).toBe(200);
+  });
+
   it('is case-insensitive on the username at the password step', async () => {
-    await authAgent(app, { username: 'Eve_5', password: 'password12345' });
+    await authAgent(app, { username: 'Eve_5', password: 'password12345', enroll: true });
     const res = await request(app).post('/api/login').send({ username: 'eve_5', password: 'password12345' });
     expect(res.status).toBe(200);
     expect(res.body.mfa_required).toBe(true);
@@ -150,6 +201,11 @@ describe('cookie-gated access', () => {
     const logout = await agent.post('/api/logout');
     expect(logout.status).toBe(200);
     expect(logout.body).toMatchObject({ authenticated: false });
+    // Single primary Set-Cookie: only carmaint_session is cleared (the pending row is
+    // deleted from the DB, so its cookie is inert). Vercel multi-Set-Cookie fix.
+    const sc = logout.headers['set-cookie'];
+    expect(sc).toHaveLength(1);
+    expect(sc[0]).toMatch(/carmaint_session=/);
 
     const after = await agent.get('/api/vehicles');
     expect(after.status).toBe(401);

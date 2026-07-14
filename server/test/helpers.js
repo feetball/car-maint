@@ -26,13 +26,12 @@ export function makeApp(dataDir, options = {}) {
   return createApp(base);
 }
 
-// Registers a fresh user and AUTO-ENROLLS TOTP so the agent ends up with a full
-// session — MFA is now required for everyone, so registration alone only yields the
-// limited setup-required state. This helper walks register → totp/setup →
-// totp/confirm (with a computed code), which upgrades to a real session cookie. The
-// agent is then a drop-in for `request(app)` in the data helpers below.
-// `agent.username`/`agent.password`/`agent.is_admin` are attached for re-login tests;
-// `agent.totpSecret` and `agent.backupCodes` are exposed for MFA-specific tests.
+// Registers a fresh user and returns an authenticated supertest agent. MFA is OPTIONAL
+// now, so registration ALONE grants a full session — no enrollment needed. The agent is
+// a drop-in for `request(app)` in the data helpers below. `agent.username`/
+// `agent.password`/`agent.is_admin` are attached for re-login tests. When a test needs
+// MFA enrolled, pass `{ enroll: true }` (or call `enrollTotp(agent)` directly), which
+// also attaches `agent.totpSecret` and `agent.backupCodes`.
 export async function authAgent(app, creds = {}) {
   const agent = request.agent(app);
   const username = creds.username ?? `u${crypto.randomUUID().slice(0, 12).replace(/-/g, '')}`;
@@ -44,19 +43,26 @@ export async function authAgent(app, creds = {}) {
   }
   // Register echoes is_admin (first-ever user in a fresh app is the bootstrap admin).
   agent.is_admin = reg.body?.is_admin === true;
+  agent.username = username;
+  agent.password = password;
 
+  if (creds.enroll) await enrollTotp(agent);
+  return agent;
+}
+
+// Enrolls TOTP on an already-authenticated (full-session) agent: totp/setup →
+// totp/confirm with a computed code. Attaches `agent.totpSecret` + `agent.backupCodes`
+// and returns the agent. Used by MFA-specific tests that need an enrolled account.
+export async function enrollTotp(agent) {
   const setup = await agent.post('/api/mfa/totp/setup').send({});
   if (setup.status !== 200) {
-    throw new Error(`authAgent totp setup failed: ${setup.status} ${setup.text}`);
+    throw new Error(`enrollTotp setup failed: ${setup.status} ${setup.text}`);
   }
   const secret = setup.body.secret_base32;
   const confirm = await agent.post('/api/mfa/totp/confirm').send({ code: totpCode(secret) });
   if (confirm.status !== 200) {
-    throw new Error(`authAgent totp confirm failed: ${confirm.status} ${confirm.text}`);
+    throw new Error(`enrollTotp confirm failed: ${confirm.status} ${confirm.text}`);
   }
-
-  agent.username = username;
-  agent.password = password;
   agent.totpSecret = secret;
   agent.backupCodes = confirm.body.backup_codes;
   return agent;

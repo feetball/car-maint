@@ -110,7 +110,7 @@ describe('WebAuthn registration', () => {
   });
 
   it('verify stores the credential and appears in status + credentials list', async () => {
-    const agent = await authAgent(app, { username: 'wa_reg' }); // already has TOTP
+    const agent = await authAgent(app, { username: 'wa_reg', enroll: true }); // already has TOTP
     const credId = b64u('cred-wa_reg');
     const res = await enrollPasskey(agent, credId, { name: 'YubiKey', transports: ['usb'] });
     expect(res.status).toBe(200);
@@ -151,22 +151,23 @@ describe('WebAuthn registration', () => {
     expect(status.body.webauthn.count).toBe(0);
   });
 
-  it('a passkey enrolled as the FIRST factor issues backup codes once + upgrades the session', async () => {
-    // Register only (setup-pending state, zero active MFA).
+  it('a passkey enrolled as the FIRST factor issues backup codes once, from a full session', async () => {
+    // MFA is optional: register grants a full session directly (no setup-pending state).
     const agent = request.agent(app);
     const reg = await agent.post('/api/register').send({ username: 'wa_first', password: 'password12345' });
-    expect(reg.body).toMatchObject({ mfa_setup_required: true });
-    // Data API blocked in the pending state.
-    expect((await agent.get('/api/vehicles')).status).toBe(403);
+    expect(reg.body).toMatchObject({ mfa_enabled: false });
+    // Data API reachable immediately (no MFA gate).
+    expect((await agent.get('/api/vehicles')).status).toBe(200);
 
     const res = await enrollPasskey(agent, b64u('cred-first'), { name: 'Phone' });
     expect(res.status).toBe(200);
     expect(res.body.verified).toBe(true);
     expect(Array.isArray(res.body.backup_codes)).toBe(true);
     expect(res.body.backup_codes).toHaveLength(10);
-    // Enrollment upgraded the pending state to a full session.
-    expect(res.body.authenticated).toBe(true);
+    // Enrollment runs in the existing full session — no cookie churn at verify.
+    expect(res.headers['set-cookie']).toBeUndefined();
     expect((await agent.get('/api/vehicles')).status).toBe(200);
+    expect((await agent.get('/api/auth/status')).body).toMatchObject({ mfa_enabled: true });
   });
 
   it('duplicate credential_id is rejected (409, prevents cross-user takeover)', async () => {
@@ -225,7 +226,7 @@ describe('WebAuthn login assertion', () => {
     expect((await anon.post('/api/login/mfa/webauthn/options').send({})).status).toBe(401);
 
     // Pending login but the account has no passkey → 400.
-    const totpOnly = await authAgent(app, { username: 'wa_nopk' });
+    const totpOnly = await authAgent(app, { username: 'wa_nopk', enroll: true });
     await totpOnly.post('/api/logout');
     const a = request.agent(app);
     await a.post('/api/login').send({ username: 'wa_nopk', password: totpOnly.password });
@@ -311,7 +312,7 @@ describe('WebAuthn management + guards', () => {
   });
 
   it('can delete a passkey when TOTP also protects the account', async () => {
-    const agent = await authAgent(app, { username: 'wa_plus_totp' }); // TOTP active
+    const agent = await authAgent(app, { username: 'wa_plus_totp', enroll: true }); // TOTP active
     await enrollPasskey(agent, b64u('cred-plus'));
     const del = await agent.delete(`/api/mfa/webauthn/${b64u('cred-plus')}`);
     expect(del.status).toBe(200);

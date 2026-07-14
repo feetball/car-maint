@@ -32,11 +32,11 @@ export function authRouter(ctx) {
   const auth = ctx.auth;
   const db = ctx.db;
 
-  // Open signup: anyone can register a username+password. Since MFA is REQUIRED for
-  // everyone, registration does NOT grant a full session — the new account has no
-  // second factor yet, so it enters the limited "setup-required" state (a pending
-  // 'setup' token in the carmaint_mfa cookie). The client must enroll TOTP before
-  // the data API is reachable.
+  // Open signup: anyone can register a username+password. MFA is OPTIONAL now, so
+  // registration grants a FULL session immediately (a SINGLE Set-Cookie: the session).
+  // The new account has no second factor yet — the client nudges them to set one up —
+  // but they land straight in the app. mfa_enabled:false tells the client to show the
+  // onboarding nudge + banner.
   router.post(
     '/register',
     asyncHandler(async (req, res) => {
@@ -67,10 +67,10 @@ export function authRouter(ctx) {
         throw err;
       }
 
-      // Limited setup state — NOT a full session.
-      const pending = await auth.createPending(userId, 'setup');
-      auth.setMfaCookie(req, res, pending);
-      res.status(201).json({ username, is_admin: !!isAdmin, mfa_setup_required: true });
+      // Full session immediately — a single Set-Cookie (the session).
+      const token = await auth.createSession(userId);
+      auth.setSessionCookie(req, res, token);
+      res.status(201).json({ username, is_admin: !!isAdmin, mfa_enabled: false });
     })
   );
 
@@ -98,15 +98,18 @@ export function authRouter(ctx) {
       }
 
       if (await hasActiveMFA(db, user.id)) {
-        // Has a second factor → pending 'login' state, await the challenge.
+        // Has a second factor → pending 'login' state, await the challenge. This path
+        // (and its security-critical login-pending gate restriction) is UNCHANGED.
         const pending = await auth.createPending(user.id, 'login');
         auth.setMfaCookie(req, res, pending);
         return res.json({ mfa_required: true, methods: await loginMethods(db, user.id) });
       }
-      // No active MFA (e.g. mid-enrollment or admin-reset account) → setup state.
-      const pending = await auth.createPending(user.id, 'setup');
-      auth.setMfaCookie(req, res, pending);
-      return res.json({ mfa_setup_required: true });
+      // No active MFA (never enrolled, or admin-reset account) → MFA is optional, so
+      // grant a FULL session immediately (a SINGLE Set-Cookie: the session). The client
+      // shows the setup nudge because mfa_enabled is false.
+      const token = await auth.createSession(user.id);
+      auth.setSessionCookie(req, res, token);
+      return res.json({ username: user.username, is_admin: !!user.is_admin, mfa_enabled: false });
     })
   );
 
@@ -184,9 +187,14 @@ export function authRouter(ctx) {
         return res.status(401).json({ error: 'Invalid code' });
       }
 
-      // Success: burn the pending token, clear its cookie, grant a full session.
+      // Success: burn the pending token from the DB and grant a full session. We emit
+      // ONLY the session Set-Cookie (no clearMfaCookie) — Vercel's serverless response
+      // path mangles/drops multiple Set-Cookie headers, so a session-granting response
+      // must carry a SINGLE Set-Cookie or the browser never stores the session and the
+      // next request 401s. Deleting the pending ROW makes the lingering carmaint_mfa
+      // cookie INERT (resolvePending returns null for a missing row), and the gate calls
+      // authenticate() BEFORE resolvePending, so the valid session always wins.
       await auth.deletePending(tokenHash);
-      auth.clearMfaCookie(req, res);
       const token = await auth.createSession(userId);
       auth.setSessionCookie(req, res, token);
       const u = await db.get('SELECT username, is_admin FROM users WHERE id = ?', [userId]);
@@ -316,9 +324,10 @@ export function authRouter(ctx) {
         [verification.authenticationInfo.newCounter, new Date().toISOString(), cred.id]
       );
 
-      // Success: complete login exactly like the code path.
+      // Success: complete login exactly like the code path. SINGLE Set-Cookie (session
+      // only) — see the note on /login/mfa above for why we do not also clear the inert
+      // carmaint_mfa cookie here (Vercel multi-Set-Cookie mangling).
       await auth.deletePending(tokenHash);
-      auth.clearMfaCookie(req, res);
       const token = await auth.createSession(userId);
       auth.setSessionCookie(req, res, token);
       const u = await db.get('SELECT username, is_admin FROM users WHERE id = ?', [userId]);
@@ -326,8 +335,12 @@ export function authRouter(ctx) {
     })
   );
 
-  // Logout: drop the full session (if any), the pending token (if any), and clear
-  // both cookies. Idempotent.
+  // Logout: drop the full session (if any) and the pending token row (if any). We emit
+  // a SINGLE Set-Cookie — clearing the PRIMARY carmaint_session cookie — and delete the
+  // pending row from the DB instead of also clearing carmaint_mfa. Once the row is gone
+  // the lingering carmaint_mfa cookie is INERT (resolvePending returns null for a
+  // missing row), so a second clear-cookie header is unnecessary. Keeping it to one
+  // Set-Cookie avoids Vercel's serverless multi-Set-Cookie mangling. Idempotent.
   router.post(
     '/logout',
     asyncHandler(async (req, res) => {
@@ -335,16 +348,16 @@ export function authRouter(ctx) {
       auth.clearSessionCookie(req, res);
       const pending = await auth.resolvePending(req);
       if (pending) await auth.deletePending(pending.tokenHash);
-      auth.clearMfaCookie(req, res);
       res.json({ authenticated: false });
     })
   );
 
   // Always public: reports auth + MFA state so the client can route.
-  //   full session      → { required, authenticated:true, username, is_admin }
-  //   pending 'login'   → { required, authenticated:false, mfa_pending:true, username }
-  //   pending 'setup'   → { required, authenticated:false, mfa_setup_required:true, username }
+  //   full session      → { required, authenticated:true, username, is_admin, mfa_enabled }
+  //   pending 'login'   → { required, authenticated:false, mfa_pending:true, username, methods }
   //   none              → { required, authenticated:false }
+  // MFA is optional, so there is no longer a "setup required" state. A full session with
+  // mfa_enabled:false is how the client knows to show the setup nudge + banner.
   router.get(
     '/auth/status',
     asyncHandler(async (req, res) => {
@@ -355,15 +368,16 @@ export function authRouter(ctx) {
           authenticated: true,
           username: user.username,
           is_admin: user.is_admin,
+          mfa_enabled: await hasActiveMFA(db, user.id),
         });
       }
       const pending = await auth.resolvePending(req);
-      if (pending) {
+      if (pending && pending.kind === 'login') {
         const u = await db.get('SELECT username FROM users WHERE id = ?', [pending.user_id]);
-        const base = { required: true, authenticated: false, username: u?.username };
-        if (pending.kind === 'setup') return res.json({ ...base, mfa_setup_required: true });
         return res.json({
-          ...base,
+          required: true,
+          authenticated: false,
+          username: u?.username,
           mfa_pending: true,
           methods: await loginMethods(db, pending.user_id),
         });

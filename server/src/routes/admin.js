@@ -159,9 +159,10 @@ export function adminRouter(ctx) {
   );
 
   // DELETE /api/admin/users/:id/mfa → lockout recovery: clear ALL of a user's MFA
-  // (TOTP, backup codes, email, passkeys, any pending challenges) and drop their sessions, so
-  // the account falls back to the setup-required state and must re-enroll on next
-  // login. This is the escape hatch when a user loses their authenticator.
+  // (TOTP, backup codes, email, passkeys, any pending challenges) and drop their sessions.
+  // The account then has no active MFA, so on next login it gets a full session directly
+  // (mfa_enabled:false, skippable) — NOT locked out. This is the escape hatch when a user
+  // loses their authenticator.
   router.delete(
     '/admin/users/:id/mfa',
     asyncHandler(async (req, res) => {
@@ -178,7 +179,7 @@ export function adminRouter(ctx) {
         // Invalidate live sessions so the reset takes effect immediately.
         await t.run('DELETE FROM sessions WHERE user_id = ?', [id]);
       });
-      res.json({ reset: true, id, mfa_setup_required: true });
+      res.json({ reset: true, id, mfa_enabled: false });
     })
   );
 
